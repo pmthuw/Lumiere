@@ -1,19 +1,31 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'pricing') ? ' active' : ''; ?>" id="page-pricing">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải trang quản lý giá.
+        </div>
+    </section>
+    <?php
+    return;
+}
+
 function ensurePricingSchema(PDO $pdo): void
 {
     $checkProfit = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'profit_rate'");
     $checkProfit->execute();
     if ((int)$checkProfit->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN profit_rate DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER price");
+        $pdo->exec("ALTER TABLE products ADD COLUMN profit_rate DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER avg_import_price");
     }
 
     $checkAvgCost = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'avg_import_price'");
     $checkAvgCost->execute();
     if ((int)$checkAvgCost->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN avg_import_price DECIMAL(15,2) NOT NULL DEFAULT 0 AFTER initial_stock");
+        $pdo->exec("ALTER TABLE products ADD COLUMN avg_import_price INT UNSIGNED NOT NULL DEFAULT 0 AFTER initial_stock");
     }
+    $pdo->exec("ALTER TABLE products MODIFY COLUMN avg_import_price INT UNSIGNED NOT NULL DEFAULT 0");
 
     $checkCode = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'product_code'");
     $checkCode->execute();
@@ -47,29 +59,6 @@ function ensurePricingSchema(PDO $pdo): void
         INDEX idx_product_id (product_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-    // Backfill initial import cost for legacy products:
-    // 1) from latest completed receipt item
-    // 2) fallback from selling price and profit rate
-    $pdo->exec("UPDATE products p
-        LEFT JOIN (
-            SELECT ri.product_id, ri.import_price
-            FROM receipt_items ri
-            INNER JOIN receipts r ON r.id = ri.receipt_id
-            INNER JOIN (
-                SELECT ri2.product_id, MAX(CONCAT(DATE_FORMAT(r2.import_date, '%Y%m%d'), '-', LPAD(r2.id, 10, '0'), '-', LPAD(ri2.id, 10, '0'))) AS max_key
-                FROM receipt_items ri2
-                INNER JOIN receipts r2 ON r2.id = ri2.receipt_id
-                WHERE r2.status = 'completed'
-                GROUP BY ri2.product_id
-            ) x ON x.product_id = ri.product_id
-                 AND CONCAT(DATE_FORMAT(r.import_date, '%Y%m%d'), '-', LPAD(r.id, 10, '0'), '-', LPAD(ri.id, 10, '0')) = x.max_key
-        ) latest ON latest.product_id = p.id
-        SET p.avg_import_price = CASE
-            WHEN latest.import_price IS NOT NULL THEN latest.import_price
-            WHEN COALESCE(p.profit_rate, 0) > 0 THEN ROUND(p.price / (1 + (p.profit_rate / 100)), 2)
-            ELSE p.price
-        END
-        WHERE COALESCE(p.avg_import_price, 0) <= 0");
 }
 
 function pricingRedirect(string $query = ''): void
@@ -99,13 +88,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         } else {
             try {
                 $stmt = $pdo->prepare("UPDATE products
-                    SET profit_rate = ?,
-                        price = CASE
-                            WHEN COALESCE(avg_import_price, 0) > 0 THEN ROUND(avg_import_price * (1 + (? / 100)))
-                            ELSE price
-                        END
+                    SET profit_rate = ?
                     WHERE id = ?");
-                $stmt->execute([$profitRate, $profitRate, $productId]);
+                $stmt->execute([$profitRate, $productId]);
                 pricingRedirect($_POST['keep_query'] ?? 'updated=1');
             } catch (Throwable $e) {
                 $errorMessage = 'Không thể cập nhật tỉ lệ lợi nhuận: ' . $e->getMessage();
@@ -121,6 +106,18 @@ if (($_GET['updated'] ?? '') === '1') {
 $search = trim($_GET['q'] ?? '');
 $receiptFilter = trim($_GET['receipt_code'] ?? '');
 
+$hasReceiptPricingTables = false;
+try {
+    $hasReceiptsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipts'")->fetchColumn();
+    $hasReceiptItemsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipt_items'")->fetchColumn();
+    $hasReceiptPricingTables = $hasReceiptsTable && $hasReceiptItemsTable;
+} catch (Throwable $e) {
+    $hasReceiptPricingTables = false;
+}
+
+$avgCostExpr = 'COALESCE(p.avg_import_price, 0)';
+$pricingJoinSql = '';
+
 $params = [];
 $where = '';
 if ($search !== '') {
@@ -130,10 +127,13 @@ if ($search !== '') {
 }
 
 $productSql = "SELECT p.id, COALESCE(p.product_code, CONCAT('SP', LPAD(p.id, 3, '0'))) AS product_code,
-    p.name, p.category, p.price AS selling_price, COALESCE(p.profit_rate, 0) AS profit_rate,
-    COALESCE(p.avg_import_price, 0) AS avg_cost,
+    p.name, p.category,
+    ROUND({$avgCostExpr} * (1 + (COALESCE(p.profit_rate, 0) / 100))) AS selling_price,
+    COALESCE(p.profit_rate, 0) AS profit_rate,
+    {$avgCostExpr} AS avg_cost,
     r.receipt_code AS latest_receipt_code, r.import_date AS latest_import_date
 FROM products p
+{$pricingJoinSql}
 LEFT JOIN receipt_items ri ON ri.id = (
     SELECT ri2.id
     FROM receipt_items ri2
@@ -152,13 +152,16 @@ $products = $productStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $receiptQuery = "SELECT r.receipt_code, r.import_date, p.id AS product_id,
     COALESCE(p.product_code, CONCAT('SP', LPAD(p.id, 3, '0'))) AS product_code,
-    p.name, p.price AS selling_price, COALESCE(p.profit_rate,0) AS profit_rate,
+    p.name,
+    ROUND({$avgCostExpr} * (1 + (COALESCE(p.profit_rate, 0) / 100))) AS selling_price,
+    COALESCE(p.profit_rate,0) AS profit_rate,
     ri.import_price AS cost_price, ri.quantity,
     ROUND(COALESCE(p.profit_rate, 0), 2) AS profit_percent_by_receipt,
     ROUND(ri.import_price * (1 + (COALESCE(p.profit_rate, 0) / 100))) AS selling_price_by_receipt
 FROM receipt_items ri
 INNER JOIN receipts r ON r.id = ri.receipt_id
 INNER JOIN products p ON p.id = ri.product_id
+{$pricingJoinSql}
 WHERE r.status = 'completed'";
 
 $receiptParams = [];

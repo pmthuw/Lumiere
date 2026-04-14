@@ -9,21 +9,28 @@ function fmtPrice(n) {
 
 // Hiển thị thông báo Toast
 function showToast(msg) {
-  const t = document.getElementById("toast");
-  if (!t) {
-    const toast = document.createElement("div");
-    toast.id = "toast";
-    toast.style.cssText =
-      "position:fixed;bottom:2rem;right:2rem;background:var(--gold);color:#000;padding:1rem 1.5rem;border-radius:0.75rem;z-index:9999;opacity:0;transition:opacity 0.3s;";
-    document.body.appendChild(toast);
+  let toastEl = document.getElementById("toast");
+
+  // Create toast if it doesn't exist (fallback if not in HTML)
+  if (!toastEl) {
+    toastEl = document.createElement("div");
+    toastEl.id = "toast";
+    document.body.appendChild(toastEl);
   }
-  const toastEl = document.getElementById("toast");
+
   toastEl.textContent = msg;
   toastEl.classList.add("show");
-  toastEl.style.opacity = "1";
-  setTimeout(() => {
+
+  console.log("[Toast]", msg);
+
+  // Clear any existing timer and update it
+  if (toastEl.toastTimer) {
+    clearTimeout(toastEl.toastTimer);
+  }
+
+  // Hide after 3 seconds
+  toastEl.toastTimer = setTimeout(() => {
     toastEl.classList.remove("show");
-    toastEl.style.opacity = "0";
   }, 3000);
 }
 

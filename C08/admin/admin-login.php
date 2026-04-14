@@ -3,21 +3,13 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 header('Content-Type: text/html; charset=UTF-8');
-$dataFile = __DIR__ . '/admin-data.json';
-$adminUsers = [];
-if (file_exists($dataFile)) {
-    $json = file_get_contents($dataFile);
-    $payload = json_decode($json, true);
-    if (isset($payload['admin_users']) && is_array($payload['admin_users'])) {
-        $adminUsers = $payload['admin_users'];
-    }
-}
+require_once __DIR__ . '/../setup_db.php';
+
 $defaultCred = [
     'username' => 'admin',
     'password' => '12345',
     'fullname' => 'Quản trị viên',
     'email' => 'admin@lumiere.vn',
-    'role' => 'admin',
     'status' => 'active',
 ];
 $errorMessage = '';
@@ -29,26 +21,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $user = trim($_POST['admin_user'] ?? '');
     $pass = $_POST['admin_pass'] ?? '';
     $found = null;
-    foreach ($adminUsers as $u) {
-        if (($u['username'] ?? '') === $user && ($u['password'] ?? '') === $pass && ($u['status'] ?? '') === 'active') {
-            $found = $u;
-            break;
+
+    // Kiểm tra từ database trước
+    if (isset($pdo) && ($pdo instanceof PDO)) {
+        try {
+            $stmt = $pdo->prepare('SELECT id, username, email, password_hash, full_name, status FROM admin_users WHERE username = ? AND status = ?');
+            $stmt->execute([$user, 'active']);
+            $dbUser = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($dbUser) {
+                $storedPassword = (string)($dbUser['password_hash'] ?? '');
+                $isValid = $storedPassword !== '' && hash_equals($storedPassword, $pass);
+                if ($isValid) {
+                    $found = [
+                        'username' => $dbUser['username'],
+                        'fullname' => $dbUser['full_name'] ?? $dbUser['username'],
+                        'email' => $dbUser['email'],
+                        'status' => $dbUser['status'],
+                    ];
+                }
+            }
+        } catch (Throwable $e) {
+            // Fallback nếu DB lỗi
         }
     }
-    if (!$found && empty($adminUsers) && $user === $defaultCred['username'] && $pass === $defaultCred['password']) {
+
+    // Fallback kiểm tra default cred nếu không tìm thấy trong DB
+    if (!$found && $user === $defaultCred['username'] && $pass === $defaultCred['password']) {
         $found = $defaultCred;
     }
+
     if ($found) {
         $_SESSION['admin_logged_in'] = true;
         $_SESSION['admin_user'] = [
             'username' => $found['username'],
             'fullname' => $found['fullname'] ?? $found['username'],
-            'role' => $found['role'] ?? 'admin',
         ];
         header('Location: index.php');
         exit;
     }
-    $errorMessage = 'Tên đăng nhập hoặc mật khẩu không đA�ng!';
+    $errorMessage = 'Tên đăng nhập hoặc mật khẩu không đúng!';
 }
 ?>
 <!doctype html>
@@ -291,7 +302,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
         <div class="login-divider"><span>✦</span></div>
         <h1 class="login-title">Đăng nhập</h1>
-        <p class="login-sub">DA�nh riêng cho quản trị viên</p>
+        <p class="login-sub">Dành riêng cho quản trị viên</p>
 
         <form method="post" novalidate>
           <div class="form-group">

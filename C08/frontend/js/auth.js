@@ -6,6 +6,7 @@
 function openAuth(tab) {
   switchAuthTab(tab);
   openModal("auth-modal");
+  initRegisterAddressSelectors();
   closeUserMenu();
 }
 
@@ -19,44 +20,212 @@ function switchAuthTab(tab) {
     .forEach((f) => f.classList.remove("active"));
   document.getElementById("tab-" + tab).classList.add("active");
   document.getElementById("form-" + tab).classList.add("active");
+  if (tab === "register") {
+    initRegisterAddressSelectors();
+  }
+}
+
+let registerAddressData = [];
+let registerAddressPromise = null;
+
+async function loadCurrentUserFromDB(options = {}) {
+  const { silent = false } = options;
+
+  try {
+    const response = await fetch("api-current-user.php", {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    const result = await response.json();
+
+    if (response.ok && result?.success && result?.user) {
+      state.user = result.user;
+      return state.user;
+    }
+
+    state.user = null;
+    return null;
+  } catch (error) {
+    if (!silent) {
+      showToast("Không thể tải thông tin tài khoản.");
+    }
+    state.user = null;
+    return null;
+  }
+}
+
+function fillSelectOptions(selectEl, options, placeholder) {
+  if (!selectEl) return;
+  const oldValue = selectEl.value;
+  selectEl.innerHTML = "";
+
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = placeholder;
+  selectEl.appendChild(first);
+
+  options.forEach((item) => {
+    const opt = document.createElement("option");
+    opt.value = item;
+    opt.textContent = item;
+    selectEl.appendChild(opt);
+  });
+
+  if (oldValue && options.includes(oldValue)) {
+    selectEl.value = oldValue;
+  }
+}
+
+function normalizeProvinceName(name) {
+  return String(name || "")
+    .replace(/^(Tỉnh|Thành phố)\s+/i, "")
+    .trim();
+}
+
+function getProvinceByName(name) {
+  const target = String(name || "").trim();
+  return (
+    registerAddressData.find((p) => {
+      const raw = String(p?.name || "").trim();
+      const normalized = normalizeProvinceName(raw);
+      return raw === target || normalized === target;
+    }) || null
+  );
+}
+
+function loadRegisterAddressData() {
+  if (registerAddressData.length > 0) {
+    return Promise.resolve(registerAddressData);
+  }
+
+  if (registerAddressPromise) {
+    return registerAddressPromise;
+  }
+
+  registerAddressPromise = fetch("assets/data.json", { cache: "force-cache" })
+    .then((res) => {
+      if (!res.ok) {
+        throw new Error("Unable to load address data");
+      }
+      return res.json();
+    })
+    .then((data) => {
+      registerAddressData = Array.isArray(data) ? data : [];
+      return registerAddressData;
+    })
+    .catch(() => {
+      registerAddressData = [];
+      return registerAddressData;
+    });
+
+  return registerAddressPromise;
+}
+
+function initRegisterAddressSelectors() {
+  const cityEl = document.getElementById("reg-city");
+  const districtEl = document.getElementById("reg-district");
+  const wardEl = document.getElementById("reg-ward");
+
+  if (!cityEl || !districtEl || !wardEl) return;
+  if (cityEl.dataset.boundAddress === "1") return;
+
+  const updateDistricts = () => {
+    const city = cityEl.value;
+    if (!city) {
+      fillSelectOptions(districtEl, [], "Chọn Quận / Huyện");
+      fillSelectOptions(wardEl, [], "Chọn Phường / Xã");
+      return;
+    }
+    const province = getProvinceByName(city);
+    const districts = Array.isArray(province?.districts)
+      ? province.districts.map((d) => d.name).filter(Boolean)
+      : [];
+    fillSelectOptions(districtEl, districts, "Chọn Quận / Huyện");
+    fillSelectOptions(wardEl, [], "Chọn Phường / Xã");
+  };
+
+  const updateWards = () => {
+    const city = cityEl.value;
+    const district = districtEl.value;
+    if (!city || !district) {
+      fillSelectOptions(wardEl, [], "Chọn Phường / Xã");
+      return;
+    }
+    const province = getProvinceByName(city);
+    const districtObj = Array.isArray(province?.districts)
+      ? province.districts.find((d) => d.name === district)
+      : null;
+    const wards = Array.isArray(districtObj?.wards)
+      ? districtObj.wards.map((w) => w.name).filter(Boolean)
+      : [];
+    fillSelectOptions(wardEl, wards, "Chọn Phường / Xã");
+  };
+
+  cityEl.addEventListener("change", updateDistricts);
+  districtEl.addEventListener("change", updateWards);
+  cityEl.dataset.boundAddress = "1";
+
+  loadRegisterAddressData().then((data) => {
+    const cityOptions = data
+      .map((p) => normalizeProvinceName(p?.name))
+      .filter(Boolean);
+    fillSelectOptions(cityEl, cityOptions, "Chọn Tỉnh / Thành phố");
+    updateDistricts();
+  });
 }
 
 // Xử lý đăng nhập
-function doLogin() {
-  const email = document.getElementById("login-email").value.trim();
-  const pass = document.getElementById("login-password").value;
+async function doLogin() {
+  const identifier = document.getElementById("login-identifier").value.trim();
+  const password = document.getElementById("login-password").value;
 
-  if (!email || !pass) {
+  if (!identifier || !password) {
     showToast("Vui lòng điền đầy đủ thông tin!");
     return;
   }
 
-  const found = state.users.find(
-    (u) => u.email === email && u.password === pass,
-  );
+  try {
+    const response = await fetch("api-login.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ identifier, password }),
+    });
 
-  if (!found) {
-    showToast("Email hoặc mật khẩu không đúng!");
-    return;
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      showToast(result?.message || "Đăng nhập thất bại. Vui lòng thử lại!");
+      return;
+    }
+
+    const user = (await loadCurrentUserFromDB({ silent: true })) || result.user;
+    state.user = user;
+
+    closeModal("auth-modal");
+    updateUserUI();
+    if (typeof loadCartFromDB === "function") {
+      loadCartFromDB(() => updateCartBadge());
+    } else {
+      updateCartBadge();
+    }
+    showToast(`Chào mừng, ${user.firstname || user.fullname}!`);
+  } catch (error) {
+    showToast("Không thể kết nối máy chủ. Vui lòng thử lại!");
   }
-
-  state.user = found;
-  localStorage.setItem("lum_user", JSON.stringify(found));
-  closeModal("auth-modal");
-  updateUserUI();
-  showToast(`Chào mừng, ${found.firstname}!`);
 }
 
 // Xử lý đăng ký
-function doRegister() {
+async function doRegister() {
   const fields = [
     "reg-lastname",
     "reg-firstname",
-    "reg-username",
     "reg-email",
+    "reg-username",
     "reg-phone",
     "reg-password",
     "reg-address",
+    "reg-ward",
     "reg-district",
     "reg-city",
   ];
@@ -70,11 +239,12 @@ function doRegister() {
   const [
     lastname,
     firstname,
-    username,
     email,
+    username,
     phone,
     password,
     address,
+    ward,
     district,
     city,
   ] = vals;
@@ -84,17 +254,17 @@ function doRegister() {
     return;
   }
 
+  if (username.length < 4) {
+    showToast("Tên tài khoản phải có ít nhất 4 ký tự!");
+    return;
+  }
+
   if (password.length < 6) {
     showToast("Mật khẩu phải có ít nhất 6 ký tự!");
     return;
   }
 
-  if (state.users.find((u) => u.email === email || u.username === username)) {
-    showToast("Email hoặc tên đăng nhập đã được đăng ký!");
-    return;
-  }
-
-  const user = {
+  const payload = {
     lastname,
     firstname,
     username,
@@ -102,27 +272,58 @@ function doRegister() {
     phone,
     password,
     address,
+    ward,
     district,
     city,
     role: "customer",
     status: "active",
-    createdAt: new Date().toLocaleDateString("vi-VN"),
   };
 
-  state.users.push(user);
-  localStorage.setItem("lum_users", JSON.stringify(state.users));
-  state.user = user;
-  localStorage.setItem("lum_user", JSON.stringify(user));
-  closeModal("auth-modal");
-  updateUserUI();
-  showToast(`Đăng ký thành công! Chào mừng, ${firstname}!`);
+  try {
+    const response = await fetch("register.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      showToast(result?.message || "Đăng ký thất bại. Vui lòng thử lại!");
+      return;
+    }
+
+    // Clear registration form
+    fields.forEach((f) => {
+      const el = document.getElementById(f);
+      if (el) el.value = "";
+    });
+
+    showToast("Đăng ký thành công! Vui lòng đăng nhập để tiếp tục.");
+
+    // Switch to login tab for user to login
+    if (typeof switchAuthTab === "function") {
+      switchAuthTab("login");
+    }
+  } catch (error) {
+    showToast("Không thể kết nối máy chủ. Vui lòng thử lại!");
+  }
 }
 
 // Xử lý đăng xuất
-function logout() {
+async function logout() {
+  try {
+    await fetch("api-logout.php", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+  } catch (error) {
+    // Keep local cleanup even if request fails.
+  }
+
   state.user = null;
   state.cart = [];
-  localStorage.removeItem("lum_user");
   localStorage.removeItem("lum_cart");
   saveCart();
   updateCartBadge();

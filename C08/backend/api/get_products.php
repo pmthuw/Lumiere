@@ -9,17 +9,10 @@ header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
 // Database configuration
-$host = getenv('DB_HOST') ?: '127.0.0.1';
-$port = (int)(getenv('DB_PORT') ?: 3307);
-$user = 'root';
-$password = '';
-$dbname = 'perfume_store';
+require_once __DIR__ . '/../../setup_db.php';
 
-try {
-    $pdo = new PDO("mysql:host=$host;port=$port;dbname=$dbname;charset=utf8", $user, $password);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch(PDOException $e) {
-    echo json_encode(['error' => 'Database connection failed: ' . $e->getMessage()]);
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    echo json_encode(['error' => 'Database connection failed']);
     exit;
 }
 
@@ -44,39 +37,53 @@ $page = max(1, (int)($_GET['page'] ?? 1));
 $perPage = (int)($_GET['perPage'] ?? 6);
 $returnFormat = $_GET['format'] ?? 'json'; // 'json' or 'html'
 
+$hasReceiptPricingTables = false;
+try {
+    $hasReceiptsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipts'")->fetchColumn();
+    $hasReceiptItemsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipt_items'")->fetchColumn();
+    $hasReceiptPricingTables = $hasReceiptsTable && $hasReceiptItemsTable;
+} catch (Throwable $e) {
+    $hasReceiptPricingTables = false;
+}
+
+$priceJoinSql = '';
+$avgCostExpr = 'COALESCE(p.avg_import_price, 0)';
+
+
 // Build query
-$sql = "SELECT * FROM products WHERE 1=1";
+$sql = "SELECT p.*, {$avgCostExpr} AS computed_avg_import_price FROM products p {$priceJoinSql} WHERE 1=1";
 $params = [];
+$displayPriceExpr = "ROUND({$avgCostExpr} * (1 + (COALESCE(p.profit_rate, 0) / 100)))";
 
 if ($hasStatusColumn) {
-    $sql .= " AND status = 'active'";
+    $sql .= " AND p.status = 'active'";
 }
 
 if ($category) {
-    $sql .= " AND category = ?";
+    $sql .= " AND p.category = ?";
     $params[] = $category;
 }
 
 if ($search) {
-    $sql .= " AND (name LIKE ? OR brand LIKE ? OR notes LIKE ?)";
+    $sql .= " AND (p.name LIKE ? OR p.brand LIKE ? OR p.notes LIKE ?)";
     $searchTerm = '%' . $search . '%';
     $params[] = $searchTerm;
     $params[] = $searchTerm;
     $params[] = $searchTerm;
 }
 
-$sql .= " AND price BETWEEN ? AND ?";
+$sql .= " AND {$displayPriceExpr} BETWEEN ? AND ?";
 $params[] = (int)$priceMin;
 $params[] = (int)$priceMax;
 
 // Count total results
-$countSql = preg_replace('/SELECT \* FROM/i', 'SELECT COUNT(*) as total FROM', explode(' ORDER BY', $sql)[0]);
+$countSql = preg_replace('/^SELECT\s.+?\sFROM\s/si', 'SELECT COUNT(*) as total FROM ', $sql);
 $countStmt = $pdo->prepare($countSql);
 $countStmt->execute($params);
 $total = (int)$countStmt->fetch(PDO::FETCH_ASSOC)['total'];
 
 // Order and limit
-$sql .= " ORDER BY id LIMIT ?, ?";
+$sql .= " ORDER BY p.id LIMIT ?, ?";
 $offset = ($page - 1) * $perPage;
 
 // Execute query
@@ -88,6 +95,10 @@ $stmt->bindValue(count($params) + 1, $offset, PDO::PARAM_INT);
 $stmt->bindValue(count($params) + 2, $perPage, PDO::PARAM_INT);
 $stmt->execute();
 $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+foreach ($products as &$product) {
+    $product['display_price'] = (int)round((float)($product['computed_avg_import_price'] ?? 0) * (1 + ((float)($product['profit_rate'] ?? 0) / 100)));
+}
+unset($product);
 
 // Return JSON format (for API calls)
 if ($returnFormat === 'json') {
@@ -96,7 +107,7 @@ if ($returnFormat === 'json') {
             'id' => (int)$product['id'],
             'name' => $product['name'],
             'category' => $product['category'],
-            'price' => (int)$product['price'],
+            'price' => (int)$product['display_price'],
             'desc' => $product['notes'] . ' - ' . $product['concentration'] . ' ' . $product['size'],
             'notes' => $product['notes'],
             'concentration' => $product['concentration'],
@@ -162,7 +173,10 @@ function renderProductCard($product): string
 {
     $badge = !empty($product['badge']) ? '<span class="product-badge">' . htmlspecialchars($product['badge']) . '</span>' : '';
     $image = formatImageUrl($product['image']);
-    $priceFormatted = number_format($product['price'], 0, '.', ',');
+    $price = isset($product['display_price'])
+        ? (int)$product['display_price']
+        : (int)round((float)($product['computed_avg_import_price'] ?? 0) * (1 + ((float)($product['profit_rate'] ?? 0) / 100)));
+    $priceFormatted = number_format($price, 0, '.', ',');
     
     return <<<HTML
 <div class="product-card" data-id="{$product['id']}">
@@ -176,7 +190,7 @@ function renderProductCard($product): string
     <p class="product-desc">{$product['notes']}</p>
     <div class="product-footer">
       <span class="product-price">{$priceFormatted} ₫</span>
-      <button class="btn-add-cart" onclick="addToCart({$product['id']}, '{$product['name']}', {$product['price']})">
+    <button class="btn-add-cart" onclick="addToCart({$product['id']}, '{$product['name']}', {$price})">
         <i class="fa-solid fa-bag-shopping"></i>
       </button>
     </div>

@@ -1,6 +1,17 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'products') ? ' active' : ''; ?>" id="page-products">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải trang sản phẩm.
+        </div>
+    </section>
+    <?php
+    return;
+}
+
 function ensureProductsBackendSchema(PDO $pdo): void
 {
     $requiredColumns = [
@@ -8,7 +19,8 @@ function ensureProductsBackendSchema(PDO $pdo): void
         'description' => "ALTER TABLE products ADD COLUMN description TEXT NULL AFTER category",
         'unit' => "ALTER TABLE products ADD COLUMN unit VARCHAR(60) NULL AFTER description",
         'initial_stock' => "ALTER TABLE products ADD COLUMN initial_stock INT UNSIGNED NOT NULL DEFAULT 0 AFTER unit",
-        'profit_rate' => "ALTER TABLE products ADD COLUMN profit_rate DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER initial_stock",
+        'avg_import_price' => "ALTER TABLE products ADD COLUMN avg_import_price INT UNSIGNED NOT NULL DEFAULT 0 AFTER initial_stock",
+        'profit_rate' => "ALTER TABLE products ADD COLUMN profit_rate DECIMAL(5,2) NOT NULL DEFAULT 30.00 AFTER initial_stock",
         'supplier' => "ALTER TABLE products ADD COLUMN supplier VARCHAR(255) NULL AFTER profit_rate",
         'status' => "ALTER TABLE products ADD COLUMN status ENUM('active','hidden') NOT NULL DEFAULT 'active' AFTER supplier"
     ];
@@ -68,6 +80,73 @@ function adminImageUrl(?string $image): string
     return $image;
 }
 
+function tableExists(PDO $pdo, string $tableName): bool
+{
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    $stmt->execute([$tableName]);
+    return (int)$stmt->fetchColumn() > 0;
+}
+
+function hasImportedProduct(PDO $pdo, int $productId): bool
+{
+    if (!tableExists($pdo, 'receipts') || !tableExists($pdo, 'receipt_items')) {
+        return false;
+    }
+
+    $stmt = $pdo->prepare(
+        "SELECT COUNT(*)
+         FROM receipt_items ri
+         INNER JOIN receipts r ON r.id = ri.receipt_id
+         WHERE ri.product_id = ? AND r.status = 'completed'"
+    );
+    $stmt->execute([$productId]);
+
+    return (int)$stmt->fetchColumn() > 0;
+}
+
+function saveUploadedProductImage(array $file): ?string
+{
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+        return null;
+    }
+
+    $tmpPath = (string)($file['tmp_name'] ?? '');
+    if ($tmpPath === '' || !is_uploaded_file($tmpPath)) {
+        return null;
+    }
+
+    $allowed = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+        'image/gif' => 'gif',
+    ];
+
+    $mime = mime_content_type($tmpPath) ?: '';
+    if (!isset($allowed[$mime])) {
+        return null;
+    }
+
+    $uploadDir = realpath(__DIR__ . '/../frontend/images');
+    if ($uploadDir === false) {
+        return null;
+    }
+
+    $targetDir = $uploadDir . DIRECTORY_SEPARATOR . 'uploads';
+    if (!is_dir($targetDir) && !mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
+        return null;
+    }
+
+    $filename = 'prod_' . date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $allowed[$mime];
+    $targetPath = $targetDir . DIRECTORY_SEPARATOR . $filename;
+
+    if (!move_uploaded_file($tmpPath, $targetPath)) {
+        return null;
+    }
+
+    return 'images/uploads/' . $filename;
+}
+
 ensureProductsBackendSchema($pdo);
 
 $productSuccess = '';
@@ -85,18 +164,19 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $unit = trim($_POST['unit'] ?? '');
         $initialStock = max(0, (int)($_POST['initial_stock'] ?? 0));
         $image = trim($_POST['image'] ?? '');
-        $profitRate = (float)($_POST['profit_rate'] ?? 0);
+        $uploadedImagePath = saveUploadedProductImage($_FILES['image_file'] ?? []);
+        $profitRate = 30.00;
+        $avgImportPrice = 0.0;
         $supplier = trim($_POST['supplier'] ?? '');
         $status = (($_POST['status'] ?? 'active') === 'hidden') ? 'hidden' : 'active';
-        $price = max(0, (int)($_POST['price'] ?? 0));
         $brand = trim($_POST['brand'] ?? '');
-        $badge = trim($_POST['badge'] ?? '');
+        $badge = null;
         $notes = trim($_POST['notes'] ?? '');
         $concentration = trim($_POST['concentration'] ?? '');
         $size = trim($_POST['size'] ?? '');
 
-        if ($name === '' || $category === '' || $unit === '' || $price <= 0) {
-            $productError = 'Vui lòng nhập đầy đủ các trường bắt buộc: tên, loại, đơn vị tính, giá.';
+        if ($name === '' || $category === '' || $unit === '') {
+            $productError = 'Vui lòng nhập đầy đủ các trường bắt buộc: tên, loại, đơn vị tính.';
         } else {
             try {
                 if ($productCode === '') {
@@ -106,7 +186,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 $stmt = $pdo->prepare("
                     INSERT INTO products (
                         product_code, name, category, description, unit, initial_stock, image,
-                        profit_rate, supplier, status, price, brand, badge, notes, concentration, size
+                        avg_import_price, profit_rate, supplier, status, brand, badge, notes, concentration, size
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 $stmt->execute([
@@ -116,11 +196,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     $description,
                     $unit,
                     $initialStock,
-                    $image !== '' ? $image : null,
+                    $uploadedImagePath ?? ($image !== '' ? $image : null),
+                    $avgImportPrice,
                     $profitRate,
                     $supplier !== '' ? $supplier : null,
                     $status,
-                    $price,
                     $brand !== '' ? $brand : '-',
                     $badge !== '' ? $badge : null,
                     $notes !== '' ? $notes : null,
@@ -135,26 +215,27 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     }
 
     if ($action === 'update') {
-        $id = (int)($_POST['id'] ?? 0);
+        $idRaw = $_POST['id'] ?? '';
+        $id = (int)$idRaw;
         $name = trim($_POST['name'] ?? '');
         $category = trim($_POST['category'] ?? '');
         $description = trim($_POST['description'] ?? '');
         $unit = trim($_POST['unit'] ?? '');
         $initialStock = max(0, (int)($_POST['initial_stock'] ?? 0));
         $image = trim($_POST['image'] ?? '');
+        $uploadedImagePath = saveUploadedProductImage($_FILES['image_file'] ?? []);
         $removeImage = isset($_POST['remove_image']) && $_POST['remove_image'] === '1';
         $profitRate = (float)($_POST['profit_rate'] ?? 0);
         $supplier = trim($_POST['supplier'] ?? '');
         $status = (($_POST['status'] ?? 'active') === 'hidden') ? 'hidden' : 'active';
-        $price = max(0, (int)($_POST['price'] ?? 0));
         $brand = trim($_POST['brand'] ?? '');
         $badge = trim($_POST['badge'] ?? '');
         $notes = trim($_POST['notes'] ?? '');
         $concentration = trim($_POST['concentration'] ?? '');
         $size = trim($_POST['size'] ?? '');
 
-        if ($id <= 0 || $name === '' || $category === '' || $unit === '' || $price <= 0) {
-            $productError = 'D? li?u c?p nh?t không h?p l?.';
+        if ($idRaw === '' || $id < 0 || $name === '' || $category === '' || $unit === '') {
+            $productError = 'Dữ liệu cập nhật không hợp lệ.';
         } else {
             try {
                 $currentStmt = $pdo->prepare("SELECT image FROM products WHERE id = ?");
@@ -162,22 +243,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 $current = $currentStmt->fetch(PDO::FETCH_ASSOC);
 
                 if (!$current) {
-                    $productError = 'S?n ph?m không t?n t?i.';
+                    $productError = 'Sản phẩm không tồn tại.';
                 } else {
                     $newImage = $current['image'];
                     if ($removeImage) {
                         $newImage = null;
+                    } elseif ($uploadedImagePath !== null) {
+                        $newImage = $uploadedImagePath;
                     } elseif ($image !== '') {
                         $newImage = $image;
                     }
 
-                    $stmt = $pdo->prepare("
-                        UPDATE products
-                        SET name = ?, category = ?, description = ?, unit = ?, initial_stock = ?, image = ?,
-                            profit_rate = ?, supplier = ?, status = ?, price = ?, brand = ?, badge = ?,
-                            notes = ?, concentration = ?, size = ?
-                        WHERE id = ?
-                    ");
+                    $stmt = $pdo->prepare("\n                        UPDATE products\n                        SET name = ?, category = ?, description = ?, unit = ?, initial_stock = ?, image = ?,\n                            profit_rate = ?, supplier = ?, status = ?, brand = ?, badge = ?,\n                            notes = ?, concentration = ?, size = ?\n                        WHERE id = ?\n                    ");
                     $stmt->execute([
                         $name,
                         $category,
@@ -188,7 +265,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                         $profitRate,
                         $supplier !== '' ? $supplier : null,
                         $status,
-                        $price,
                         $brand !== '' ? $brand : '-',
                         $badge !== '' ? $badge : null,
                         $notes !== '' ? $notes : null,
@@ -206,7 +282,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
     if ($action === 'toggle_status') {
         $id = (int)($_POST['id'] ?? 0);
-        if ($id > 0) {
+        $idRaw = $_POST['id'] ?? '';
+        $id = (int)$idRaw;
+        if ($idRaw !== '' && $id >= 0) {
             try {
                 $stmt = $pdo->prepare("
                     UPDATE products
@@ -223,14 +301,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
     if ($action === 'delete') {
         $id = (int)($_POST['id'] ?? 0);
-        if ($id > 0) {
+        $idRaw = $_POST['id'] ?? '';
+        $id = (int)$idRaw;
+        if ($idRaw !== '' && $id >= 0) {
             try {
-                $stmt = $pdo->prepare("SELECT name, initial_stock FROM products WHERE id = ?");
+                $stmt = $pdo->prepare("SELECT id, name, initial_stock FROM products WHERE id = ?");
                 $stmt->execute([$id]);
                 $product = $stmt->fetch(PDO::FETCH_ASSOC);
 
                 if ($product) {
-                    $hasImported = ((int)$product['initial_stock'] > 0);
+                    $hasImported = hasImportedProduct($pdo, (int)$product['id']);
 
                     if ($hasImported) {
                         $hideStmt = $pdo->prepare("UPDATE products SET status = 'hidden' WHERE id = ?");
@@ -254,13 +334,34 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 $editingProduct = null;
 
 $categories = $pdo->query("SELECT id, name, description FROM categories ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
-$products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$productsSql = "
+    SELECT
+        p.*,
+        GREATEST(
+            0,
+            COALESCE(p.initial_stock, 0)
+            - COALESCE(exp.total_export, 0)
+        ) AS stock_qty
+    FROM products p
+    LEFT JOIN (
+        SELECT oi.product_id, SUM(oi.quantity) AS total_export
+        FROM order_items oi
+        INNER JOIN orders o ON o.id = oi.order_id
+        WHERE o.status IN ('processing', 'shipping', 'shipped', 'delivered')
+        GROUP BY oi.product_id
+    ) exp ON exp.product_id = p.id
+    ORDER BY p.id DESC
+";
+$products = $pdo->query($productsSql)->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <section class="admin-page<?php echo ($page === 'products') ? ' active' : ''; ?>" id="page-products">
     <div class="page-header">
         <div class="page-header-left">
-            <span class="eyebrow">Quan ly kho hang</span>
-            <h1>San pham</h1>
+            <span class="eyebrow">Quản lý kho hàng</span>
+            <h1>Sản phẩm</h1>
+        </div>
+        <div class="page-header-right">
+            <button type="button" class="btn btn-gold" id="open-add-product-btn" onclick="openProductAddModal()">+ Thêm sản phẩm</button>
         </div>
     </div>
 
@@ -278,21 +379,19 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
 
     <div class="table-wrap">
         <div class="table-toolbar">
-            <h3>Danh sach san pham <span style="color: var(--muted); font-size: 0.8rem; font-weight: 400;">(<?php echo count($products); ?> SP)</span></h3>
+            <h3>Danh sách sản phẩm <span style="color: var(--muted); font-size: 0.8rem; font-weight: 400;">(<?php echo count($products); ?> SP)</span></h3>
         </div>
         <table>
             <thead>
                 <tr>
                     <th>Mã</th>
-                    <th>San pham</th>
-                    <th>Loai</th>
-                    <th>Don vi</th>
-                    <th>SL ban dau</th>
-                    <th>Giá</th>
-                    <th>Loi nhuan</th>
-                    <th>Nha cung cap</th>
-                    <th>Hien trang</th>
-                    <th>Thao tac</th>
+                    <th>Sản phẩm</th>
+                    <th>Loại</th>
+                    <th>Đơn vị</th>
+                    <th>Số lượng</th>
+                    <th>Nhà cung cấp</th>
+                    <th>Hiện trạng</th>
+                    <th>Thao tác</th>
                 </tr>
             </thead>
             <tbody>
@@ -316,13 +415,11 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
                         </td>
                         <td><span class="badge badge-muted"><?php echo htmlspecialchars($product['category']); ?></span></td>
                         <td><?php echo htmlspecialchars($product['unit'] ?? '-'); ?></td>
-                        <td><?php echo (int)($product['initial_stock'] ?? 0); ?></td>
-                        <td class="td-gold"><?php echo number_format((int)$product['price'], 0, ',', '.'); ?>đ</td>
-                        <td><?php echo (float)($product['profit_rate'] ?? 0); ?>%</td>
-                        <td class="td-muted"><?php echo htmlspecialchars($product['supplier'] ?? '-'); ?></td>
+                        <td><?php echo (int)($product['stock_qty'] ?? $product['initial_stock'] ?? 0); ?></td>
+                        <td class="td-name"><?php echo htmlspecialchars($product['supplier'] ?? '-'); ?></td>
                         <td>
                             <span class="badge <?php echo (($product['status'] ?? 'active') === 'active') ? 'badge-success' : 'badge-danger'; ?>">
-                                <?php echo (($product['status'] ?? 'active') === 'active') ? 'Hien thi' : 'An'; ?>
+                                <?php echo (($product['status'] ?? 'active') === 'active') ? 'Hiển thị' : 'Ẩn'; ?>
                             </span>
                         </td>
                         <td>
@@ -338,7 +435,6 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
                                     data-unit="<?php echo htmlspecialchars((string)($product['unit'] ?? ''), ENT_QUOTES); ?>"
                                     data-initial-stock="<?php echo (int)($product['initial_stock'] ?? 0); ?>"
                                     data-profit-rate="<?php echo (float)($product['profit_rate'] ?? 0); ?>"
-                                    data-price="<?php echo (int)($product['price'] ?? 0); ?>"
                                     data-supplier="<?php echo htmlspecialchars((string)($product['supplier'] ?? ''), ENT_QUOTES); ?>"
                                     data-brand="<?php echo htmlspecialchars((string)($product['brand'] ?? ''), ENT_QUOTES); ?>"
                                     data-status="<?php echo htmlspecialchars((string)($product['status'] ?? 'active'), ENT_QUOTES); ?>"
@@ -348,18 +444,18 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
                                     data-image="<?php echo htmlspecialchars((string)($product['image'] ?? ''), ENT_QUOTES); ?>"
                                     data-notes="<?php echo htmlspecialchars((string)($product['notes'] ?? ''), ENT_QUOTES); ?>"
                                     data-description="<?php echo htmlspecialchars((string)($product['description'] ?? ''), ENT_QUOTES); ?>"
-                                >Sua</button>
+                                >Sửa</button>
                                 <form method="post" style="display:inline;">
                                     <input type="hidden" name="product_action" value="toggle_status">
                                     <input type="hidden" name="id" value="<?php echo (int)$product['id']; ?>">
                                     <button type="submit" class="btn btn-sm <?php echo (($product['status'] ?? 'active') === 'active') ? 'btn-danger' : 'btn-ghost'; ?>">
-                                        <?php echo (($product['status'] ?? 'active') === 'active') ? 'An' : 'Hien'; ?>
+                                        <?php echo (($product['status'] ?? 'active') === 'active') ? 'Ẩn' : 'Hiện'; ?>
                                     </button>
                                 </form>
-                                <form method="post" style="display:inline;" onsubmit="return confirm('Xac nhan xoa san pham nay?');">
+                                <form method="post" style="display:inline;" onsubmit="return confirm('Xác nhận xóa sản phẩm này?');">
                                     <input type="hidden" name="product_action" value="delete">
                                     <input type="hidden" name="id" value="<?php echo (int)$product['id']; ?>">
-                                    <button type="submit" class="btn btn-danger btn-sm btn-icon">Xoa</button>
+                                    <button type="submit" class="btn btn-danger btn-sm btn-icon">Xóa</button>
                                 </form>
                             </div>
                         </td>
@@ -369,102 +465,95 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
         </table>
     </div>
 
-    <div id="product-form-grid" style="display:grid; grid-template-columns: 1fr; gap:1.5rem; margin-top:1.5rem; align-items:start;">
-        <div class="table-wrap" style="padding:1.5rem;">
-            <h3 style="font-family:'Playfair Display', serif; margin-bottom:1rem;">Them san pham</h3>
-            <form method="post">
+    <div id="product-add-modal" style="display:none; position:fixed; inset:0; background:rgba(6,8,16,0.7); z-index:1200; align-items:center; justify-content:center; padding:1rem;">
+        <div class="table-wrap" style="padding:1.25rem; width:min(980px, 100%); max-height:90vh; overflow:auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.85rem;">
+                <h3 style="font-family:'Playfair Display', serif; margin:0;">Thêm sản phẩm</h3>
+                <button id="close-add-product" class="btn btn-ghost btn-sm" type="button" aria-label="Đóng" onclick="closeProductAddModal()">x</button>
+            </div>
+
+            <form method="post" enctype="multipart/form-data">
                 <input type="hidden" name="product_action" value="add">
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Ma san pham</label>
+                        <label>Mã sản phẩm</label>
                         <input class="form-control" type="text" name="product_code" value="<?php echo htmlspecialchars(nextProductCode($pdo)); ?>" />
                     </div>
                     <div class="form-group">
-                        <label>Ten san pham *</label>
+                        <label>Tên sản phẩm *</label>
                         <input class="form-control" type="text" name="name" required />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Loai san pham *</label>
+                        <label>Loại sản phẩm *</label>
                         <select class="form-control" name="category" required>
-                            <option value="">-- Chon loai --</option>
+                            <option value="">-- Chọn loại --</option>
                             <?php foreach ($categories as $cat): ?>
                                 <option value="<?php echo htmlspecialchars($cat['name']); ?>"><?php echo htmlspecialchars($cat['name']); ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Don vi tinh *</label>
+                        <label>Đơn vị tính *</label>
                         <input class="form-control" type="text" name="unit" placeholder="chai, hop, set..." required />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>So luong ban dau</label>
+                        <label>Số lượng ban đầu</label>
                         <input class="form-control" type="number" name="initial_stock" min="0" value="0" />
                     </div>
                     <div class="form-group">
-                        <label>Ti le loi nhuan (%)</label>
-                        <input class="form-control" type="number" step="0.01" name="profit_rate" min="0" value="0" />
-                    </div>
-                </div>
-                <div class="form-row form-row-2">
-                    <div class="form-group">
-                        <label>Gia ban *</label>
-                        <input class="form-control" type="number" name="price" min="0" required />
-                    </div>
-                    <div class="form-group">
-                        <label>Nha cung cap</label>
+                        <label>Nhà cung cấp</label>
                         <input class="form-control" type="text" name="supplier" />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Thuong hieu</label>
+                        <label>Thương hiệu</label>
                         <input class="form-control" type="text" name="brand" />
                     </div>
                     <div class="form-group">
-                        <label>Hien trang</label>
+                        <label>Hiện trạng</label>
                         <select class="form-control" name="status">
-                            <option value="active">Hien thi (dang ban)</option>
-                            <option value="hidden">An (khong ban)</option>
+                            <option value="active">Hiển thị (đang bán)</option>
+                            <option value="hidden">Ẩn (không bán)</option>
                         </select>
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Nong do</label>
+                        <label>Nồng độ</label>
                         <input class="form-control" type="text" name="concentration" />
                     </div>
                     <div class="form-group">
-                        <label>Dung tich</label>
+                        <label>Dung tích</label>
                         <input class="form-control" type="text" name="size" />
-                    </div>
-                </div>
-                <div class="form-row form-row-2">
-                    <div class="form-group">
-                        <label>Badge</label>
-                        <input class="form-control" type="text" name="badge" />
-                    </div>
-                    <div class="form-group">
-                        <label>Duong dan hinh anh</label>
-                        <input class="form-control" type="text" name="image" />
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Ghi chu mui huong</label>
+                        <label>Hình ảnh sản phẩm</label>
+                        <input class="form-control" type="file" name="image_file" accept="image/*" />
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Ghi chú mùi hương</label>
                         <input class="form-control" type="text" name="notes" />
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Mo ta</label>
+                        <label>Mô tả</label>
                         <textarea class="form-control" name="description"></textarea>
                     </div>
                 </div>
-                <button class="btn btn-gold" type="submit">+ Them san pham</button>
+                <div style="display:flex; gap:0.6rem;">
+                    <button class="btn btn-gold" type="submit">+ Thêm sản phẩm</button>
+                    <button class="btn btn-ghost" type="button" id="close-add-product-footer" onclick="closeProductAddModal()">Hủy</button>
+                </div>
             </form>
         </div>
     </div>
@@ -472,29 +561,29 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
     <div id="product-edit-modal" style="display:none; position:fixed; inset:0; background:rgba(6,8,16,0.7); z-index:1200; align-items:center; justify-content:center; padding:1rem;">
         <div class="table-wrap" style="padding:1.25rem; width:min(980px, 100%); max-height:90vh; overflow:auto;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.85rem;">
-                <h3 style="font-family:'Playfair Display', serif; margin:0;">Sua san pham</h3>
-                <button id="close-edit-product" class="btn btn-ghost btn-sm" type="button" aria-label="Dong" onclick="closeProductEditModal()">x</button>
+                <h3 style="font-family:'Playfair Display', serif; margin:0;">Sửa sản phẩm</h3>
+                <button id="close-edit-product" class="btn btn-ghost btn-sm" type="button" aria-label="Đóng" onclick="closeProductEditModal()">x</button>
             </div>
             <div style="background: rgba(11, 107, 60, 0.12); border: 1px solid rgba(11, 107, 60, 0.45); color: #9be2bf; padding: 0.75rem 0.9rem; margin-bottom: 1rem; border-radius: 0.5rem;">
-                Dang sua: <strong id="editing-product-name"></strong> (<span id="editing-product-code"></span>)
+                Đang sửa: <strong id="editing-product-name"></strong> (<span id="editing-product-code"></span>)
             </div>
 
-            <form method="post">
+            <form method="post" enctype="multipart/form-data">
                 <input type="hidden" name="product_action" value="update">
                 <input id="edit-id" type="hidden" name="id" value="">
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Ma san pham</label>
+                        <label>Mã sản phẩm</label>
                         <input id="edit-product-code" class="form-control" type="text" value="" readonly />
                     </div>
                     <div class="form-group">
-                        <label>Ten san pham *</label>
+                        <label>Tên sản phẩm *</label>
                         <input id="edit-name" class="form-control" type="text" name="name" value="" required />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Loai san pham *</label>
+                        <label>Loại sản phẩm *</label>
                         <select id="edit-category" class="form-control" name="category" required>
                             <?php foreach ($categories as $cat): ?>
                                 <option value="<?php echo htmlspecialchars($cat['name']); ?>"><?php echo htmlspecialchars($cat['name']); ?></option>
@@ -502,50 +591,46 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Don vi tinh *</label>
+                        <label>Đơn vị tính *</label>
                         <input id="edit-unit" class="form-control" type="text" name="unit" value="" required />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>So luong ban dau</label>
+                        <label>Số lượng ban đầu</label>
                         <input id="edit-initial-stock" class="form-control" type="number" name="initial_stock" min="0" value="0" />
                     </div>
                     <div class="form-group">
-                        <label>Ti le loi nhuan (%)</label>
-                        <input id="edit-profit-rate" class="form-control" type="number" step="0.01" name="profit_rate" min="0" value="0" />
+                        <label>Tỉ lệ lợi nhuận (%)</label>
+                        <input id="edit-profit-rate" class="form-control" type="number" step="0.01" name="profit_rate" min="0" value="30" />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
-                    <div class="form-group">
-                        <label>Gia ban *</label>
-                        <input id="edit-price" class="form-control" type="number" name="price" min="0" value="0" required />
-                    </div>
-                    <div class="form-group">
-                        <label>Nha cung cap</label>
+                    <div class="form-group" style="grid-column: 1 / -1;">
+                        <label>Nhà cung cấp</label>
                         <input id="edit-supplier" class="form-control" type="text" name="supplier" value="" />
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Thuong hieu</label>
+                        <label>Thương hiệu</label>
                         <input id="edit-brand" class="form-control" type="text" name="brand" value="" />
                     </div>
                     <div class="form-group">
-                        <label>Hien trang</label>
+                        <label>Hiện trạng</label>
                         <select id="edit-status" class="form-control" name="status">
-                            <option value="active">Hien thi (dang ban)</option>
-                            <option value="hidden">An (khong ban)</option>
+                            <option value="active">Hiển thị (đang bán)</option>
+                            <option value="hidden">Ẩn (không bán)</option>
                         </select>
                     </div>
                 </div>
                 <div class="form-row form-row-2">
                     <div class="form-group">
-                        <label>Nong do</label>
+                        <label>Nồng độ</label>
                         <input id="edit-concentration" class="form-control" type="text" name="concentration" value="" />
                     </div>
                     <div class="form-group">
-                        <label>Dung tich</label>
+                        <label>Dung tích</label>
                         <input id="edit-size" class="form-control" type="text" name="size" value="" />
                     </div>
                 </div>
@@ -555,34 +640,40 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
                         <input id="edit-badge" class="form-control" type="text" name="badge" value="" />
                     </div>
                     <div class="form-group">
-                        <label>Duong dan hinh anh</label>
+                        <label>Đường dẫn hình ảnh</label>
                         <input id="edit-image" class="form-control" type="text" name="image" value="" />
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Hoặc chọn ảnh từ máy tính</label>
+                        <input id="edit-image-file" class="form-control" type="file" name="image_file" accept="image/*" />
                     </div>
                 </div>
                 <div class="form-row" id="edit-image-wrap" style="display:none;">
                     <div class="form-group">
-                        <img id="edit-image-preview" src="" alt="Anh hien tai" style="width:80px;height:80px;object-fit:cover;border-radius:8px;margin-bottom:8px;" />
+                        <img id="edit-image-preview" src="" alt="Ảnh hiện tại" style="width:80px;height:80px;object-fit:cover;border-radius:8px;margin-bottom:8px;" />
                         <label style="display:flex;align-items:center;gap:8px;">
                             <input id="edit-remove-image" type="checkbox" name="remove_image" value="1" />
-                            Bo hinh hien tai
+                            Bỏ hình hiện tại
                         </label>
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Ghi chu mui huong</label>
+                        <label>Ghi chú mùi hương</label>
                         <input id="edit-notes" class="form-control" type="text" name="notes" value="" />
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Mo ta</label>
+                        <label>Mô tả</label>
                         <textarea id="edit-description" class="form-control" name="description"></textarea>
                     </div>
                 </div>
                 <div style="display:flex; gap:0.6rem;">
-                    <button id="edit-submit-btn" class="btn btn-gold" type="submit">Cap nhat san pham</button>
-                    <button class="btn btn-ghost" type="button" id="close-edit-product-footer" onclick="closeProductEditModal()">Huy</button>
+                    <button id="edit-submit-btn" class="btn btn-gold" type="submit">Cập nhật sản phẩm</button>
+                    <button class="btn btn-ghost" type="button" id="close-edit-product-footer" onclick="closeProductEditModal()">Hủy</button>
                 </div>
             </form>
         </div>
@@ -591,6 +682,11 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
 
 <script>
     window.addEventListener('DOMContentLoaded', function () {
+        var addModal = document.getElementById('product-add-modal');
+        var openAddBtn = document.getElementById('open-add-product-btn');
+        var closeAddBtn = document.getElementById('close-add-product');
+        var closeAddFooterBtn = document.getElementById('close-add-product-footer');
+
         var editModal = document.getElementById('product-edit-modal');
         var editButtons = document.querySelectorAll('.edit-product-btn');
         var closeBtn = document.getElementById('close-edit-product');
@@ -599,11 +695,30 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
         var imageWrap = document.getElementById('edit-image-wrap');
         var imagePreview = document.getElementById('edit-image-preview');
 
+        function syncBodyScrollLock() {
+            var anyModalOpen = (addModal && addModal.style.display === 'flex') || (editModal && editModal.style.display === 'flex');
+            document.body.style.overflow = anyModalOpen ? 'hidden' : '';
+        }
+
+        function setAddModalVisibility(show) {
+            if (!addModal) return;
+            addModal.style.display = show ? 'flex' : 'none';
+            syncBodyScrollLock();
+        }
+
         function setModalVisibility(show) {
             if (!editModal) return;
             editModal.style.display = show ? 'flex' : 'none';
-            document.body.style.overflow = show ? 'hidden' : '';
+            syncBodyScrollLock();
         }
+
+        window.openProductAddModal = function () {
+            setAddModalVisibility(true);
+        };
+
+        window.closeProductAddModal = function () {
+            setAddModalVisibility(false);
+        };
 
         function updateImagePreview(imagePath) {
             if (!imageWrap || !imagePreview) return;
@@ -637,7 +752,6 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
             document.getElementById('edit-unit').value = data.unit || '';
             document.getElementById('edit-initial-stock').value = data.initialStock || '0';
             document.getElementById('edit-profit-rate').value = data.profitRate || '0';
-            document.getElementById('edit-price').value = data.price || '0';
             document.getElementById('edit-supplier').value = data.supplier || '';
             document.getElementById('edit-brand').value = data.brand || '';
             document.getElementById('edit-status').value = data.status || 'active';
@@ -669,6 +783,24 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
             });
         }
 
+        if (openAddBtn) {
+            openAddBtn.addEventListener('click', function () {
+                window.openProductAddModal();
+            });
+        }
+
+        if (closeAddBtn) {
+            closeAddBtn.addEventListener('click', function () {
+                window.closeProductAddModal();
+            });
+        }
+
+        if (closeAddFooterBtn) {
+            closeAddFooterBtn.addEventListener('click', function () {
+                window.closeProductAddModal();
+            });
+        }
+
         if (closeFooterBtn) {
             closeFooterBtn.addEventListener('click', function () {
                 window.closeProductEditModal();
@@ -689,6 +821,15 @@ $products = $pdo->query("SELECT * FROM products ORDER BY id DESC")->fetchAll(PDO
             });
         }
 
+        if (addModal) {
+            addModal.addEventListener('click', function (e) {
+                if (e.target === addModal) {
+                    window.closeProductAddModal();
+                }
+            });
+        }
+
+        setAddModalVisibility(false);
         setModalVisibility(false);
     });
 </script>

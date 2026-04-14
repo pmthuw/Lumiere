@@ -4,18 +4,10 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
-// Database configuration
-$host = getenv('DB_HOST') ?: '127.0.0.1';
-$port = (int)(getenv('DB_PORT') ?: 3307);
-$user = 'root';
-$password = '';
-$dbname = 'perfume_store';
+require_once __DIR__ . '/../../setup_db.php';
 
-try {
-    $pdo = new PDO("mysql:host=$host;port=$port;dbname=$dbname;charset=utf8", $user, $password);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch(PDOException $e) {
-    echo json_encode(['error' => 'Database connection failed: ' . $e->getMessage()]);
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    echo json_encode(['error' => 'Database connection failed']);
     exit;
 }
 
@@ -56,20 +48,37 @@ function apiImageUrl(?string $image): string
 // Get all products
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     try {
-        if ($hasStatusColumn) {
-            $stmt = $pdo->query("SELECT * FROM products WHERE status = 'active' ORDER BY id");
-        } else {
-            $stmt = $pdo->query("SELECT * FROM products ORDER BY id");
+        $hasReceiptPricingTables = false;
+        try {
+            $hasReceiptsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipts'")->fetchColumn();
+            $hasReceiptItemsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipt_items'")->fetchColumn();
+            $hasReceiptPricingTables = $hasReceiptsTable && $hasReceiptItemsTable;
+        } catch (Throwable $e) {
+            $hasReceiptPricingTables = false;
         }
+
+        $priceJoinSql = '';
+        $avgCostExpr = 'COALESCE(p.avg_import_price, 0)';
+
+
+        $sql = "SELECT p.*, {$avgCostExpr} AS computed_avg_import_price FROM products p {$priceJoinSql}";
+        if ($hasStatusColumn) {
+            $sql .= " WHERE p.status = 'active'";
+        }
+        $sql .= " ORDER BY p.id";
+
+        $stmt = $pdo->query($sql);
         $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         // Transform data to match frontend format
         $transformed = array_map(function($product) {
+            $displayPrice = (int)round((float)($product['computed_avg_import_price'] ?? 0) * (1 + ((float)($product['profit_rate'] ?? 0) / 100)));
+
             return [
                 'id' => (int)$product['id'],
                 'name' => $product['name'],
                 'category' => $product['category'],
-                'price' => (int)$product['price'],
+                'price' => $displayPrice,
                 'desc' => $product['notes'] . ' - ' . $product['concentration'] . ' ' . $product['size'],
                 'notes' => $product['notes'],
                 'concentration' => $product['concentration'],

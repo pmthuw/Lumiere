@@ -21,18 +21,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = $_POST['password'] ?? '';
 
     if ($identifier === '' || $password === '') {
-        $errorMessage = 'Vui lòng nhập đầy đủ email/tên đăng nhập và mật khẩu.';
+        $errorMessage = 'Vui lòng nhập tên đăng nhập và mật khẩu.';
   } elseif (!isset($pdo) || !($pdo instanceof PDO)) {
     $errorMessage = 'Không thể kết nối dữ liệu. Vui lòng thử lại.';
     } else {
         try {
             $stmt = $pdo->prepare(
-                'SELECT id, full_name, username, email, password_hash, role, phone, address, district, city, status
+              'SELECT id, full_name, username, email, password_hash, phone, address, ward, district, city, status
                  FROM users
-                 WHERE email = :identifier OR username = :identifier
+                 WHERE username = :identifier
                  LIMIT 1'
             );
-            $stmt->execute(['identifier' => $identifier]);
+            $stmt->execute([':identifier' => $identifier]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$user) {
@@ -40,15 +40,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif (in_array((string)($user['status'] ?? 'active'), ['locked', 'inactive'], true)) {
                 $errorMessage = 'Tài khoản đã bị khóa hoặc tạm ngưng.';
             } else {
-                $storedHash = (string)($user['password_hash'] ?? '');
-                $isValid = $storedHash !== '' && password_verify($password, $storedHash);
-
-                // Backward compatibility: some old rows may still store plain password.
-                if (!$isValid && $storedHash !== '' && hash_equals($storedHash, $password)) {
-                    $isValid = true;
-                    $rehash = password_hash($password, PASSWORD_DEFAULT);
-                    $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([$rehash, (int)$user['id']]);
-                }
+              $storedPassword = (string)($user['password_hash'] ?? '');
+              $isValid = $storedPassword !== '' && hash_equals($storedPassword, $password);
 
                 if (!$isValid) {
                     $errorMessage = 'Mật khẩu không đúng.';
@@ -68,9 +61,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'lastname' => $lastname,
                         'phone' => (string)($user['phone'] ?? ''),
                         'address' => (string)($user['address'] ?? ''),
+                        'ward' => (string)($user['ward'] ?? ''),
                         'district' => (string)($user['district'] ?? ''),
                         'city' => (string)($user['city'] ?? ''),
-                        'role' => (string)($user['role'] ?? 'customer'),
                         'status' => (string)($user['status'] ?? 'active'),
                     ];
 
@@ -101,7 +94,7 @@ $loginSuccess = isset($_GET['ok']) && $_GET['ok'] === '1' && is_array($loggedInU
         <a class="brand" href="index.php">LUMIERE</a>
         <nav class="main-nav">
           <a href="index.php">Trang chủ</a>
-          <a href="product.php">Sản phẩm</a>
+          <a href="index.php#products">Sản phẩm</a>
           <a href="login.php" class="active">Đăng nhập</a>
         </nav>
       </div>
@@ -197,8 +190,6 @@ $loginSuccess = isset($_GET['ok']) && $_GET['ok'] === '1' && is_array($loggedInU
     <?php if ($loginSuccess && $loggedInUser): ?>
       <script>
         (function () {
-          const user = <?php echo json_encode($loggedInUser, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
-          localStorage.setItem("lum_user", JSON.stringify(user));
           const next = <?php echo json_encode($redirectTo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
           window.location.replace(next || "index.php");
         })();

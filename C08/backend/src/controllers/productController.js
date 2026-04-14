@@ -48,7 +48,7 @@ exports.filterProducts = asyncHandler(async (req, res) => {
   // Apply price filter if provided
   if (minPrice || maxPrice) {
     const priceFiltered = products.filter((product) => {
-      const price = product.price;
+      const price = Number(product.price || 0);
       const min = minPrice ? parseInt(minPrice) : 0;
       const max = maxPrice ? parseInt(maxPrice) : Infinity;
       return price >= min && price <= max;

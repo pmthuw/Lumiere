@@ -42,11 +42,11 @@
         <h2>Chào mừng trở lại</h2>
         <p>Đăng nhập để xem giỏ hàng và đặt hàng của bạn.</p>
         <div class="form-group">
-          <label>Email</label>
+          <label>Tên đăng nhập</label>
           <input
-            type="email"
-            id="login-email"
-            placeholder="email@example.com"
+            type="text"
+            id="login-identifier"
+            placeholder="Tên tài khoản để đăng nhập"
           />
         </div>
         <div class="form-group">
@@ -87,6 +87,22 @@
         <h2>Tạo tài khoản</h2>
         <p>Đăng ký để mua sắm và nhận ưu đãi từ LUMIERE.</p>
         <div class="form-grid">
+          <div class="form-group full">
+            <label>Tên tài khoản</label>
+            <input
+              type="text"
+              id="reg-username"
+              placeholder="Tên tài khoản dùng để đăng nhập"
+            />
+          </div>
+          <div class="form-group full">
+            <label>Mật khẩu</label>
+            <input
+              type="password"
+              id="reg-password"
+              placeholder="Tối thiểu 6 ký tự"
+            />
+          </div>
           <div class="form-group">
             <label>Họ</label>
             <input type="text" id="reg-lastname" placeholder="Nguyễn" />
@@ -94,14 +110,6 @@
           <div class="form-group">
             <label>Tên</label>
             <input type="text" id="reg-firstname" placeholder="Văn A" />
-          </div>
-          <div class="form-group full">
-            <label>Tên đăng nhập</label>
-            <input
-              type="text"
-              id="reg-username"
-              placeholder="van.a"
-            />
           </div>
           <div class="form-group full">
             <label>Email</label>
@@ -123,14 +131,6 @@
             />
           </div>
           <div class="form-group full">
-            <label>Mật khẩu</label>
-            <input
-              type="password"
-              id="reg-password"
-              placeholder="Tối thiểu 6 ký tự"
-            />
-          </div>
-          <div class="form-group full">
             <label>Địa chỉ giao hàng</label>
             <input
               type="text"
@@ -139,47 +139,21 @@
             />
           </div>
           <div class="form-group">
+            <label>Phường / Xã</label>
+            <select id="reg-ward" required>
+              <option value="">Chọn Phường / Xã</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label>Quận / Huyện</label>
-            <input type="text" id="reg-district" placeholder="Quận 1" />
+            <select id="reg-district" required>
+              <option value="">Chọn Quận / Huyện</option>
+            </select>
           </div>
           <div class="form-group">
             <label>Tỉnh / Thành phố</label>
-            <select id="reg-city">
+            <select id="reg-city" required>
               <option value="">Chọn Tỉnh / Thành phố</option>
-              <option value="TP. HCM">TP. HCM</option>
-              <option value="Hà Nội">Hà Nội</option>
-              <option value="Đà Nẵng">Đà Nẵng</option>
-              <option value="Hải Phòng">Hải Phòng</option>
-              <option value="Cần Thơ">Cần Thơ</option>
-              <option value="Bình Dương">Bình Dương</option>
-              <option value="Đồng Nai">Đồng Nai</option>
-              <option value="Khánh Hòa">Khánh Hòa</option>
-              <option value="Bà Rịa - Vũng Tàu">Bà Rịa - Vũng Tàu</option>
-              <option value="Long An">Long An</option>
-              <option value="Đồng Tháp">Đồng Tháp</option>
-              <option value="Tiền Giang">Tiền Giang</option>
-              <option value="Vĩnh Long">Vĩnh Long</option>
-              <option value="Bến Tre">Bến Tre</option>
-              <option value="Tây Ninh">Tây Ninh</option>
-              <option value="Bình Phước">Bình Phước</option>
-              <option value="Bình Định">Bình Định</option>
-              <option value="Quảng Nam">Quảng Nam</option>
-              <option value="Nghệ An">Nghệ An</option>
-              <option value="Thanh Hóa">Thanh Hóa</option>
-              <option value="Thừa Thiên Huế">Thừa Thiên Huế</option>
-              <option value="Quảng Ninh">Quảng Ninh</option>
-              <option value="Ninh Bình">Ninh Bình</option>
-              <option value="Nam Định">Nam Định</option>
-              <option value="Hưng Yên">Hưng Yên</option>
-              <option value="Hải Dương">Hải Dương</option>
-              <option value="Bắc Ninh">Bắc Ninh</option>
-              <option value="Phú Thọ">Phú Thọ</option>
-              <option value="Lâm Đồng">Lâm Đồng</option>
-              <option value="Hà Tĩnh">Hà Tĩnh</option>
-              <option value="Quảng Ngãi">Quảng Ngãi</option>
-              <option value="Ninh Thuận">Ninh Thuận</option>
-              <option value="Cà Mau">Cà Mau</option>
-              <option value="Kon Tum">Kon Tum</option>
             </select>
           </div>
         </div>

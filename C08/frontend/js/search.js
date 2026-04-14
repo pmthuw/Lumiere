@@ -127,46 +127,17 @@ function toggleAdvanced() {
   if (panel) panel.classList.toggle("open");
 }
 
-// Thực hiện tìm kiếm
+// Thực hiện tìm kiếm - submit server-side form
 function doSearch() {
-  state.filterCategory = document.getElementById("filter-category").value;
-  const minVal = document.getElementById("price-min").value;
-  const maxVal = document.getElementById("price-max").value;
-  state.priceMin = minVal ? parseInt(minVal) : null;
-  state.priceMax = maxVal ? parseInt(maxVal) : null;
-  state.isSearching = Boolean(
-    state.filterCategory || state.priceMin !== null || state.priceMax !== null,
-  );
-  state.currentCategory = "";
-  state.page = 1;
-  document
-    .querySelectorAll(".tab-btn")
-    .forEach((b) => b.classList.remove("active"));
-  document.querySelector(".tab-btn").classList.add("active");
-  document.getElementById("section-eyebrow").textContent = state.isSearching
-    ? "Kết quả lọc"
-    : "Sản phẩm";
-  document.getElementById("section-title").textContent = state.isSearching
-    ? "Kết quả lọc"
-    : "Tất cả sản phẩm";
-  renderProducts();
-  document.getElementById("products").scrollIntoView({ behavior: "smooth" });
+  const form = document.getElementById("products-search-form");
+  if (form && typeof form.submit === "function") {
+    form.submit();
+  }
 }
 
-// Xóa bộ lọc
+// Xóa bộ lọc - redirect to clean query
 function resetSearch() {
-  state.filterCategory = "";
-  state.priceMin = null;
-  state.priceMax = null;
-  state.isSearching = false;
-  state.page = 1;
-  document.getElementById("filter-category").value = "";
-  document.getElementById("price-min").value = "";
-  document.getElementById("price-max").value = "";
-  closeSuggestions();
-  document.getElementById("section-eyebrow").textContent = "Featured Products";
-  document.getElementById("section-title").textContent = "Sản phẩm nổi bật";
-  renderProducts();
+  window.location.href = "?page=1#products";
 }
 
 // Mở trang tìm kiếm

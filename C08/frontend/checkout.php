@@ -1,3 +1,144 @@
+<?php
+declare(strict_types=1);
+
+if (session_status() === PHP_SESSION_NONE) {
+  session_start();
+}
+
+require_once __DIR__ . '/../admin/db.php';
+
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+  throw new RuntimeException('Database connection is not available.');
+}
+
+function e(string $value): string {
+  return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+function formatPrice(int|float $price): string {
+  return number_format((float)$price, 0, '.', ',') . '₫';
+}
+
+function formatImagePath($image): string {
+  $image = trim((string)$image);
+  if ($image === '') return 'images/placeholder.jpg';
+  if (str_starts_with($image, 'http') || str_starts_with($image, '/')) return $image;
+  if (str_starts_with($image, 'frontend/')) return '../' . $image;
+  if (str_starts_with($image, 'images/')) return $image;
+  return 'images/' . $image;
+}
+
+$sessionUser = $_SESSION['customer_user'] ?? null;
+$userEmail = '';
+if (is_array($sessionUser) && isset($sessionUser['email'])) {
+  $userEmail = trim((string)$sessionUser['email']);
+}
+if ($userEmail === '') {
+  $userEmail = trim((string)($_GET['user'] ?? ''));
+}
+
+$profile = [
+  'firstname' => '',
+  'lastname' => '',
+  'phone' => '',
+  'email' => $userEmail,
+  'address' => '',
+  'ward' => '',
+  'district' => '',
+  'city' => '',
+  'note' => '',
+];
+
+if (is_array($sessionUser)) {
+  $profile['firstname'] = trim((string)($sessionUser['firstname'] ?? ''));
+  $profile['lastname'] = trim((string)($sessionUser['lastname'] ?? ''));
+  $profile['phone'] = trim((string)($sessionUser['phone'] ?? ''));
+  $profile['email'] = trim((string)($sessionUser['email'] ?? $userEmail));
+  $profile['address'] = trim((string)($sessionUser['address'] ?? ''));
+  $profile['ward'] = trim((string)($sessionUser['ward'] ?? ''));
+  $profile['district'] = trim((string)($sessionUser['district'] ?? ''));
+  $profile['city'] = trim((string)($sessionUser['city'] ?? ''));
+}
+
+if ($profile['firstname'] === '' && $profile['lastname'] === '' && $userEmail !== '') {
+  try {
+    $userStmt = $pdo->prepare('SELECT full_name, phone, address, district, city FROM users WHERE email = ? LIMIT 1');
+    $userStmt->execute([$userEmail]);
+    $dbUser = $userStmt->fetch(PDO::FETCH_ASSOC);
+    if (is_array($dbUser)) {
+      $fullName = trim((string)($dbUser['full_name'] ?? ''));
+      if ($fullName !== '') {
+        $parts = preg_split('/\s+/', $fullName);
+        $profile['firstname'] = (string)array_pop($parts);
+        $profile['lastname'] = implode(' ', $parts ?: []);
+      }
+      $profile['phone'] = trim((string)($dbUser['phone'] ?? $profile['phone']));
+      $profile['address'] = trim((string)($dbUser['address'] ?? $profile['address']));
+      $profile['district'] = trim((string)($dbUser['district'] ?? $profile['district']));
+      $profile['city'] = trim((string)($dbUser['city'] ?? $profile['city']));
+    }
+  } catch (Throwable $e) {
+    // Keep profile defaults if lookup fails.
+  }
+}
+
+$cartItems = [];
+$subtotal = 0;
+
+$hasReceiptPricingTables = false;
+try {
+  $hasReceiptsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipts'")->fetchColumn();
+  $hasReceiptItemsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipt_items'")->fetchColumn();
+  $hasReceiptPricingTables = $hasReceiptsTable && $hasReceiptItemsTable;
+} catch (Throwable $e) {
+  $hasReceiptPricingTables = false;
+}
+
+$priceJoinSql = '';
+$avgCostExpr = 'COALESCE(p.avg_import_price, 0)';
+
+
+if ($userEmail !== '') {
+  try {
+    $stmt = $pdo->prepare(<<<SQL
+      SELECT 
+        sc.product_id,
+        sc.quantity,
+        p.name,
+        ROUND({$avgCostExpr} * (1 + (COALESCE(p.profit_rate, 0) / 100))) AS price,
+        p.image,
+        p.brand,
+        p.notes,
+        p.concentration,
+        p.size,
+        p.badge,
+        (sc.quantity * ROUND({$avgCostExpr} * (1 + (COALESCE(p.profit_rate, 0) / 100)))) AS subtotal
+      FROM shopping_cart sc
+      JOIN products p ON sc.product_id = p.id
+      {$priceJoinSql}
+      WHERE sc.user_email = ?
+      ORDER BY sc.created_at DESC
+    SQL);
+    $stmt->execute([$userEmail]);
+    $cartItems = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $subtotal = (int)array_reduce($cartItems, fn($sum, $item) => $sum + (int)$item['subtotal'], 0);
+  } catch (Throwable $e) {
+    $cartItems = [];
+    $subtotal = 0;
+  }
+}
+
+$transferCode = 'LUMIERE-' . date('His') . '-' . random_int(100, 999);
+$cartPayload = array_map(
+  static fn($item) => [
+    'id' => (int)$item['product_id'],
+    'name' => (string)$item['name'],
+    'qty' => (int)$item['quantity'],
+    'price' => (int)$item['price'],
+  ],
+  $cartItems
+);
+?>
 <!doctype html>
 <html lang="vi">
 <head>
@@ -315,6 +456,67 @@
       border-radius: 0.85rem; padding: 0.85rem 2rem;
       font-size: 1.05rem; color: var(--gold); font-weight: 600; letter-spacing: 0.08em;
     }
+    .success-summary {
+      width: min(640px, 96vw);
+      text-align: left;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 1rem 1.1rem;
+      max-height: 42vh;
+      overflow: auto;
+    }
+    .success-summary-head {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 0.8rem;
+    }
+    .ss-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.32rem 0;
+      border-bottom: 1px dashed rgba(255,255,255,0.08);
+      font-size: 0.87rem;
+      color: var(--muted);
+    }
+    .ss-row strong {
+      color: var(--text);
+      text-align: right;
+      font-weight: 500;
+      max-width: 68%;
+    }
+    .ss-items {
+      margin-top: 0.65rem;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      padding-top: 0.65rem;
+    }
+    .ss-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.35rem 0;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .ss-item strong {
+      color: var(--text);
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    .ss-total {
+      margin-top: 0.65rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.7rem;
+      display: flex;
+      justify-content: space-between;
+      font-size: 1rem;
+      color: var(--gold);
+      font-weight: 600;
+      font-family: 'Playfair Display', serif;
+    }
     .success-btns { display: flex; gap: 0.85rem; flex-wrap: wrap; justify-content: center; margin-top: 0.5rem; }
     .btn { display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; padding: 0.9rem 2rem; border: 1px solid transparent; cursor: pointer; font: 500 0.82rem/1 'Jost', sans-serif; letter-spacing: 0.08em; text-transform: uppercase; transition: all 0.25s ease; text-decoration: none; }
     .btn-gold { background: var(--gold); color: #080808; border-color: var(--gold); }
@@ -350,6 +552,9 @@
       .header-inner { padding: 1rem; }
       .checkout-wrap { padding: 1.5rem 1rem 4rem; }
       .card { padding: 1.5rem 1.25rem; }
+      .success-summary { width: 100%; }
+      .ss-row { flex-direction: column; gap: 0.2rem; }
+      .ss-row strong { max-width: 100%; text-align: left; }
     }
   </style>
 </head>
@@ -386,23 +591,23 @@
         <div class="form-row cols2">
           <div class="field">
             <label>Họ</label>
-            <input type="text" id="f-lastname" placeholder="Nguyễn" />
+            <input type="text" id="f-lastname" placeholder="Nguyễn" value="<?php echo e($profile['lastname']); ?>" />
           </div>
           <div class="field">
             <label>Tên</label>
-            <input type="text" id="f-firstname" placeholder="Văn A" />
+            <input type="text" id="f-firstname" placeholder="Văn A" value="<?php echo e($profile['firstname']); ?>" />
           </div>
         </div>
         <div class="form-row">
           <div class="field">
             <label>Số điện thoại</label>
-            <input type="tel" id="f-phone" placeholder="09xx xxx xxx" />
+            <input type="tel" id="f-phone" placeholder="09xx xxx xxx" value="<?php echo e($profile['phone']); ?>" />
           </div>
         </div>
         <div class="form-row">
           <div class="field">
             <label>Email (nhận xác nhận đơn hàng)</label>
-            <input type="email" id="f-email" placeholder="email@example.com" />
+            <input type="email" id="f-email" placeholder="email@example.com" value="<?php echo e($profile['email']); ?>" />
           </div>
         </div>
       </div>
@@ -417,63 +622,33 @@
         <div class="form-row">
           <div class="field">
             <label>Số nhà, tên đường</label>
-            <input type="text" id="f-address" placeholder="123 Lê Lợi" />
+            <input type="text" id="f-address" placeholder="123 Lê Lợi" value="<?php echo e($profile['address']); ?>" />
           </div>
         </div>
         <div class="form-row cols3">
           <div class="field">
             <label>Phường / Xã</label>
-            <input type="text" id="f-ward" placeholder="Phường Bến Nghé" />
+            <select id="f-ward">
+              <option value="">Chọn Phường / Xã</option>
+            </select>
           </div>
           <div class="field">
             <label>Quận / Huyện</label>
-            <input type="text" id="f-district" placeholder="Quận 1" />
+            <select id="f-district">
+              <option value="">Chọn Quận / Huyện</option>
+            </select>
           </div>
           <div class="field">
             <label>Tỉnh / Thành phố</label>
             <select id="f-city">
               <option value="">Chọn Tỉnh / Thành phố</option>
-              <option value="TP. HCM">TP. HCM</option>
-              <option value="Hà Nội">Hà Nội</option>
-              <option value="Đà Nẵng">Đà Nẵng</option>
-              <option value="Hải Phòng">Hải Phòng</option>
-              <option value="Cần Thơ">Cần Thơ</option>
-              <option value="Bình Dương">Bình Dương</option>
-              <option value="Đồng Nai">Đồng Nai</option>
-              <option value="Khánh Hòa">Khánh Hòa</option>
-              <option value="Bà Rịa - Vũng Tàu">Bà Rịa - Vũng Tàu</option>
-              <option value="Long An">Long An</option>
-              <option value="Đồng Tháp">Đồng Tháp</option>
-              <option value="Tiền Giang">Tiền Giang</option>
-              <option value="Vĩnh Long">Vĩnh Long</option>
-              <option value="Bến Tre">Bến Tre</option>
-              <option value="Tây Ninh">Tây Ninh</option>
-              <option value="Bình Phước">Bình Phước</option>
-              <option value="Bình Định">Bình Định</option>
-              <option value="Quảng Nam">Quảng Nam</option>
-              <option value="Nghệ An">Nghệ An</option>
-              <option value="Thanh Hóa">Thanh Hóa</option>
-              <option value="Thừa Thiên Huế">Thừa Thiên Huế</option>
-              <option value="Quảng Ninh">Quảng Ninh</option>
-              <option value="Ninh Bình">Ninh Bình</option>
-              <option value="Nam Định">Nam Định</option>
-              <option value="Hưng Yên">Hưng Yên</option>
-              <option value="Hải Dương">Hải Dương</option>
-              <option value="Bắc Ninh">Bắc Ninh</option>
-              <option value="Phú Thọ">Phú Thọ</option>
-              <option value="Lâm Đồng">Lâm Đồng</option>
-              <option value="Hà Tĩnh">Hà Tĩnh</option>
-              <option value="Quảng Ngãi">Quảng Ngãi</option>
-              <option value="Ninh Thuận">Ninh Thuận</option>
-              <option value="Cà Mau">Cà Mau</option>
-              <option value="Kon Tum">Kon Tum</option>
             </select>
           </div>
         </div>
         <div class="form-row">
           <div class="field">
             <label>Ghi chú giao hàng (không bắt buộc)</label>
-            <input type="text" id="f-note" placeholder="Giao giờ hành chính, gọi trước khi giao…" />
+            <input type="text" id="f-note" placeholder="Giao giờ hành chính, gọi trước khi giao…" value="<?php echo e($profile['note']); ?>" />
           </div>
         </div>
       </div>
@@ -576,7 +751,7 @@
             <button class="copy-btn" onclick="copyText('1234567890123456', this)">Sao chép</button>
           </div>
           <div style="margin-top:0.6rem;font-size:0.8rem;color:var(--muted);">
-            Nội dung chuyển khoản: <strong style="color:var(--gold);" id="transfer-note">LUMIERE-ORDER</strong>
+            Nội dung chuyển khoản: <strong style="color:var(--gold);" id="transfer-note"><?php echo e($transferCode); ?></strong>
           </div>
         </div>
 
@@ -625,15 +800,36 @@
       <div class="summary-card">
         <div class="summary-header">Đơn hàng của bạn</div>
         <div class="order-items" id="order-items">
-          <!-- rendered by JS -->
+          <?php if (empty($cartItems)): ?>
+            <p style="color:var(--muted);text-align:center;padding:1.5rem;">Giỏ hàng trống</p>
+          <?php else: ?>
+            <?php foreach ($cartItems as $item): ?>
+              <div class="order-item">
+                <div class="item-img">
+                  ◈
+                  <img src="<?php echo e(formatImagePath($item['image'] ?? '')); ?>" alt="<?php echo e((string)$item['name']); ?>" onerror="this.style.display='none'">
+                  <?php if (!empty($item['badge'])): ?>
+                    <span class="item-badge"><?php echo e((string)$item['badge']); ?></span>
+                  <?php endif; ?>
+                </div>
+                <div class="item-info">
+                  <div class="item-name"><?php echo e((string)$item['name']); ?></div>
+                  <div class="item-meta"><?php echo e((string)($item['brand'] ?? '-')); ?> · <?php echo e((string)($item['concentration'] ?? '-')); ?> · <?php echo e((string)($item['size'] ?? '-')); ?></div>
+                  <div class="item-meta" style="margin-top:0.2rem;"><?php echo e((string)($item['notes'] ?? '')); ?></div>
+                  <span class="item-qty">SL: <?php echo (int)$item['quantity']; ?></span>
+                </div>
+                <div class="item-price"><?php echo e(formatPrice((int)$item['subtotal'])); ?></div>
+              </div>
+            <?php endforeach; ?>
+          <?php endif; ?>
         </div>
         <div class="summary-totals">
-          <div class="total-row"><span>Tạm tính</span><span id="subtotal-val">—</span></div>
+          <div class="total-row"><span>Tạm tính</span><span id="subtotal-val"><?php echo e(formatPrice($subtotal)); ?></span></div>
           <div class="total-row"><span>Phí giao hàng</span><span style="color:var(--success);">Miễn phí</span></div>
-          <div class="total-row grand"><span>Tổng cộng</span><span id="grand-val">—</span></div>
+          <div class="total-row grand"><span>Tổng cộng</span><span id="grand-val"><?php echo e(formatPrice($subtotal)); ?></span></div>
         </div>
         <div class="confirm-area">
-          <button class="btn-confirm" id="confirm-btn" onclick="placeOrder()">
+          <button class="btn-confirm" id="confirm-btn" onclick="placeOrder()" <?php echo empty($cartItems) ? 'disabled' : ''; ?>>
             <span class="spinner" id="spinner"></span>
             <span id="confirm-text">Xác nhận đặt hàng →</span>
           </button>
@@ -651,85 +847,70 @@
   <h2>Đặt hàng thành công!</h2>
   <p>Cảm ơn bạn đã tin tưởng LUMIERE. Đơn hàng của bạn đang được xử lý và sẽ được giao sớm nhất có thể.</p>
   <div class="order-code" id="success-order-code">#LUM-000000</div>
+  <div class="success-summary" id="success-summary">
+    <div class="success-summary-head">Tóm tắt đơn hàng</div>
+    <div class="ss-row"><span>Người nhận</span><strong id="ss-customer">-</strong></div>
+    <div class="ss-row"><span>Số điện thoại</span><strong id="ss-phone">-</strong></div>
+    <div class="ss-row"><span>Email</span><strong id="ss-email">-</strong></div>
+    <div class="ss-row"><span>Địa chỉ giao hàng</span><strong id="ss-address">-</strong></div>
+    <div class="ss-row"><span>Thanh toán</span><strong id="ss-payment">-</strong></div>
+    <div class="ss-items" id="ss-items"></div>
+    <div class="ss-total"><span>Tổng cộng</span><span id="ss-total">0₫</span></div>
+  </div>
   <p style="font-size:0.8rem;color:var(--muted);">Email xác nhận đã được gửi đến hộp thư của bạn.</p>
   <div class="success-btns">
     <a href="index.php" class="btn btn-gold">Tiếp tục mua sắm</a>
-    <a href="index.php" class="btn btn-ghost">Xem đơn hàng</a>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
-// ── LOAD DATA FROM LOCALSTORAGE ──────────────────────────────────────────────
-const PRODUCTS = [
-  { id:1, name:"Chanel No.5", category:"Nữ", price:7200000, brand:"Chanel", badge:"Bestseller", notes:"Hoa cỏ aldehyde", concentration:"Eau de Parfum", size:"100ml", image:"images/hinh1.jpg" },
-  { id:2, name:"Dior Sauvage", category:"Nam", price:8800000, brand:"Dior", badge:"Hot", notes:"Fougère Woody", concentration:"Eau de Toilette", size:"100ml", image:"images/hinh3.jpg" },
-  { id:3, name:"Tom Ford Black Orchid", category:"Unisex", price:6600000, brand:"Tom Ford", badge:"", notes:"Oriental Floral", concentration:"Eau de Parfum", size:"50ml", image:"images/hinh4.jpg" },
-  { id:4, name:"YSL Black Opium", category:"Nữ", price:8400000, brand:"YSL", badge:"New", notes:"Oriental Floral", concentration:"Eau de Parfum", size:"90ml", image:"images/hinh5.jpg" },
-  { id:5, name:"Creed Aventus", category:"Nam", price:14500000, brand:"Creed", badge:"Luxury", notes:"Fruity Chypre", concentration:"Eau de Parfum", size:"100ml", image:"images/hinh6.jpg" },
-  { id:6, name:"Jo Malone Peony", category:"Unisex", price:8200000, brand:"Jo Malone", badge:"", notes:"Floral Fruity", concentration:"Cologne", size:"100ml", image:"images/hinh7.jpg" },
-  { id:7, name:"Versace Eros", category:"Nam", price:10800000, brand:"Versace", badge:"", notes:"Oriental Fougère", concentration:"Eau de Toilette", size:"100ml", image:"images/hinh8.jpg" },
-  { id:8, name:"Gucci Bloom", category:"Nữ", price:9800000, brand:"Gucci", badge:"", notes:"Floral", concentration:"Eau de Parfum", size:"100ml", image:"images/hinh9.jpg" },
-  { id:9, name:"Maison Margiela Replica", category:"Unisex", price:8900000, brand:"Maison Margiela", badge:"Limited", notes:"Woody Floral Musk", concentration:"Eau de Toilette", size:"100ml", image:"images/hinh10.jpg" },
-  { id:10, name:"Hermès Terre", category:"Nam", price:9200000, brand:"Hermès", badge:"", notes:"Woody Citrus", concentration:"Eau de Toilette", size:"75ml", image:"images/hinh11.jpg" },
-  { id:11, name:"Lancôme La Vie Est Belle", category:"Nữ", price:11100000, brand:"Lancôme", badge:"", notes:"Oriental Floral", concentration:"Eau de Parfum", size:"75ml", image:"images/hinh12.jpg" },
-  { id:12, name:"Kilian Angel Share", category:"Unisex", price:9800000, brand:"Kilian", badge:"Limited", notes:"Oriental Woody", concentration:"Eau de Parfum", size:"50ml", image:"images/hinh13.jpg" },
-  { id:13, name:"Million Elixir", category:"Limited", price:9800000, brand:"Milion", badge:"Limited", notes:"Amber Oud", concentration:"Extrait de Parfum", size:"50ml", image:"images/hinh14.jpg" },
-  { id:14, name:"Attrape-Rêves", category:"Limited", price:13350000, brand:"Attrape", badge:"Limited", notes:"Floral Fruity Gourmand", concentration:"Eau de Parfum", size:"100ml", image:"images/hinh15.jpg" },
-];
-
-const cart  = JSON.parse(localStorage.getItem('lum_cart')  || '[]');
-const user  = JSON.parse(localStorage.getItem('lum_user')  || 'null');
+const cart = <?php echo json_encode($cartPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+const user = <?php echo json_encode(['email' => $profile['email']], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+const checkoutSubtotal = <?php echo (int)$subtotal; ?>;
+const initialProfileAddress = {
+  city: <?php echo json_encode($profile['city'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>,
+  district: <?php echo json_encode($profile['district'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>,
+  ward: <?php echo json_encode($profile['ward'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>
+};
 
 function fmt(n){ return n.toLocaleString('vi-VN') + '₫'; }
 
-// ── PRE-FILL FORM ────────────────────────────────────────────────────────────
-if (user) {
-  document.getElementById('f-lastname').value  = user.lastname  || '';
-  document.getElementById('f-firstname').value = user.firstname || '';
-  document.getElementById('f-phone').value     = user.phone     || '';
-  document.getElementById('f-email').value     = user.email     || '';
-  document.getElementById('f-address').value   = user.address   || '';
-  document.getElementById('f-district').value  = user.district  || '';
-  document.getElementById('f-city').value      = user.city      || '';
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-// ── RENDER ORDER ITEMS ───────────────────────────────────────────────────────
-(function renderItems(){
-  const wrap = document.getElementById('order-items');
-  if (!cart.length) {
-    wrap.innerHTML = '<p style="color:var(--muted);text-align:center;padding:1.5rem;">Giỏ hàng trống</p>';
-    return;
-  }
-  let subtotal = 0;
-  wrap.innerHTML = cart.map(item => {
-    const p = PRODUCTS.find(x => x.id === item.id);
-    if (!p) return '';
-    subtotal += p.price * item.qty;
-    return `
-      <div class="order-item">
-        <div class="item-img">
-          ◈
-          ${p.image ? `<img src="${p.image}" alt="${p.name}" onerror="this.style.display='none'">` : ''}
-          ${p.badge ? `<span class="item-badge">${p.badge}</span>` : ''}
-        </div>
-        <div class="item-info">
-          <div class="item-name">${p.name}</div>
-          <div class="item-meta">${p.brand} · ${p.concentration} · ${p.size}</div>
-          <div class="item-meta" style="margin-top:0.2rem;">${p.notes}</div>
-          <span class="item-qty">SL: ${item.qty}</span>
-        </div>
-        <div class="item-price">${fmt(p.price * item.qty)}</div>
-      </div>`;
+function renderSuccessSummary(payload) {
+  const ward = payload.ward ? payload.ward + ', ' : '';
+  const district = payload.district ? payload.district + ', ' : '';
+  const city = payload.city ? payload.city : '';
+  const address = [payload.shipping_address, ward + district + city]
+    .filter(Boolean)
+    .join(' - ');
+
+  document.getElementById('ss-customer').textContent = payload.customer_name || '-';
+  document.getElementById('ss-phone').textContent = payload.customer_phone || '-';
+  document.getElementById('ss-email').textContent = payload.customer_email || '-';
+  document.getElementById('ss-address').textContent = address || '-';
+  document.getElementById('ss-payment').textContent = payload.payment_method || '-';
+
+  const itemsWrap = document.getElementById('ss-items');
+  itemsWrap.innerHTML = cart.map((item) => {
+    const itemTotal = (Number(item.price) || 0) * (Number(item.qty) || 0);
+    return '<div class="ss-item">'
+      + '<span>' + escapeHtml(item.name || 'Sản phẩm') + ' x' + Number(item.qty || 0) + '</span>'
+      + '<strong>' + fmt(itemTotal) + '</strong>'
+      + '</div>';
   }).join('');
 
-  document.getElementById('subtotal-val').textContent = fmt(subtotal);
-  document.getElementById('grand-val').textContent    = fmt(subtotal);
-
-  // dynamic transfer note
-  document.getElementById('transfer-note').textContent = 'LUMIERE-' + Date.now().toString().slice(-6);
-})();
+  document.getElementById('ss-total').textContent = fmt(Number(payload.total_amount) || 0);
+}
 
 // ── PAYMENT SWITCH ───────────────────────────────────────────────────────────
 const allPanels = ['cod','banking','momo','vnpay','zalopay','card'];
@@ -760,14 +941,145 @@ function copyText(text, btn) {
   });
 }
 
+function normalizeProvinceName(name) {
+  return String(name || '')
+    .replace(/^(Tỉnh|Thành phố)\s+/i, '')
+    .trim();
+}
+
+function normalizeCityAlias(name) {
+  const v = String(name || '').trim().toLowerCase();
+  if (!v) return '';
+
+  const aliasMap = {
+    'tp. hcm': 'Hồ Chí Minh',
+    'tphcm': 'Hồ Chí Minh',
+    'tp hcm': 'Hồ Chí Minh',
+    'hcm': 'Hồ Chí Minh',
+    'hcmc': 'Hồ Chí Minh',
+    'sai gon': 'Hồ Chí Minh',
+    'sài gòn': 'Hồ Chí Minh',
+    'hn': 'Hà Nội',
+    'tp ha noi': 'Hà Nội',
+    'tp. ha noi': 'Hà Nội',
+    'da nang': 'Đà Nẵng',
+    'hai phong': 'Hải Phòng',
+    'can tho': 'Cần Thơ'
+  };
+
+  return aliasMap[v] || name;
+}
+
+function fillSelectOptions(selectEl, options, placeholder, selectedValue) {
+  if (!selectEl) return;
+  selectEl.innerHTML = '';
+
+  const first = document.createElement('option');
+  first.value = '';
+  first.textContent = placeholder;
+  selectEl.appendChild(first);
+
+  options.forEach((item) => {
+    const opt = document.createElement('option');
+    opt.value = item;
+    opt.textContent = item;
+    selectEl.appendChild(opt);
+  });
+
+  if (selectedValue && options.includes(selectedValue)) {
+    selectEl.value = selectedValue;
+  }
+}
+
+function initCheckoutAddressSelectors() {
+  const cityEl = document.getElementById('f-city');
+  const districtEl = document.getElementById('f-district');
+  const wardEl = document.getElementById('f-ward');
+
+  if (!cityEl || !districtEl || !wardEl) return;
+
+  fetch('assets/data.json', { cache: 'force-cache' })
+    .then((res) => {
+      if (!res.ok) {
+        throw new Error('Không thể tải dữ liệu địa chỉ');
+      }
+      return res.json();
+    })
+    .then((provinceData) => {
+      const provinces = Array.isArray(provinceData) ? provinceData : [];
+      const cityOptions = provinces
+        .map((p) => normalizeProvinceName(p?.name))
+        .filter(Boolean);
+
+      const getProvinceByCity = (cityName) => {
+        const target = normalizeCityAlias(cityName);
+        return provinces.find((p) => {
+        const raw = String(p?.name || '').trim();
+        const normalized = normalizeProvinceName(raw);
+        return raw === target || normalized === target;
+      }) || null;
+      };
+
+      const updateDistricts = (selectedDistrict = '') => {
+        const city = cityEl.value;
+        if (!city) {
+          fillSelectOptions(districtEl, [], 'Chọn Quận / Huyện', '');
+          fillSelectOptions(wardEl, [], 'Chọn Phường / Xã', '');
+          return;
+        }
+        const province = getProvinceByCity(city);
+        const districts = Array.isArray(province?.districts)
+          ? province.districts.map((d) => d.name).filter(Boolean)
+          : [];
+        fillSelectOptions(districtEl, districts, 'Chọn Quận / Huyện', selectedDistrict);
+        fillSelectOptions(wardEl, [], 'Chọn Phường / Xã', '');
+      };
+
+      const updateWards = (selectedWard = '') => {
+        const city = cityEl.value;
+        const district = districtEl.value;
+        if (!city || !district) {
+          fillSelectOptions(wardEl, [], 'Chọn Phường / Xã', '');
+          return;
+        }
+        const province = getProvinceByCity(city);
+        const districtObj = Array.isArray(province?.districts)
+          ? province.districts.find((d) => d.name === district)
+          : null;
+        const wards = Array.isArray(districtObj?.wards)
+          ? districtObj.wards.map((w) => w.name).filter(Boolean)
+          : [];
+        fillSelectOptions(wardEl, wards, 'Chọn Phường / Xã', selectedWard);
+      };
+
+      fillSelectOptions(cityEl, cityOptions, 'Chọn Tỉnh / Thành phố', normalizeCityAlias(initialProfileAddress.city || ''));
+      updateDistricts(initialProfileAddress.district || '');
+      updateWards(initialProfileAddress.ward || '');
+
+      cityEl.addEventListener('change', () => updateDistricts(''));
+      districtEl.addEventListener('change', () => updateWards(''));
+    })
+    .catch(() => {
+      // Keep current form usable even when address file cannot be loaded.
+    });
+}
+
+initCheckoutAddressSelectors();
+
 // ── VALIDATION + ORDER ───────────────────────────────────────────────────────
 function placeOrder() {
+  if (!Array.isArray(cart) || cart.length === 0) {
+    showToast('Giỏ hàng trống, không thể đặt hàng!');
+    return;
+  }
+
   const fields = [
     ['f-lastname',  'Họ'],
     ['f-firstname', 'Tên'],
     ['f-phone',     'Số điện thoại'],
     ['f-email',     'Email'],
     ['f-address',   'Địa chỉ'],
+    ['f-ward',      'Phường / Xã'],
     ['f-district',  'Quận / Huyện'],
     ['f-city',      'Tỉnh / Thành phố'],
   ];
@@ -804,10 +1116,7 @@ function placeOrder() {
     // Save order to backend database
     const payMethod = document.querySelector('input[name=payment]:checked').value;
     const payLabels = { cod:'Thanh toán khi nhận hàng', momo:'MoMo', vnpay:'VNPay QR', zalopay:'ZaloPay', banking:'Chuyển khoản ngân hàng', card:'Thẻ tín dụng / ghi nợ' };
-    const subtotal = cart.reduce((s, item) => {
-      const p = PRODUCTS.find(x => x.id === item.id);
-      return s + (p ? p.price * item.qty : 0);
-    }, 0);
+    const subtotal = checkoutSubtotal;
 
     const payload = {
       customer_name: document.getElementById('f-lastname').value.trim() + ' ' + document.getElementById('f-firstname').value.trim(),
@@ -819,7 +1128,7 @@ function placeOrder() {
       city: document.getElementById('f-city').value.trim(),
       notes: document.getElementById('f-note').value.trim(),
       payment_method: payLabels[payMethod],
-      user_email: user ? user.email : '',
+      user_email: user && user.email ? user.email : '',
       items: cart.map(item => ({ id: item.id, qty: item.qty })),
       total_amount: subtotal
     };
@@ -836,10 +1145,15 @@ function placeOrder() {
         throw new Error(data.message || 'Không thể tạo đơn hàng');
       }
 
-      // Clear cart
-      localStorage.setItem('lum_cart', '[]');
+      // Clear cart in server DB
+      if (user && user.email) {
+        await fetch(`../backend/api/cart.php?action=clear&user=${encodeURIComponent(user.email)}`, {
+          method: 'POST'
+        });
+      }
 
       // Show success
+      renderSuccessSummary(payload);
       document.getElementById('success-order-code').textContent = '#' + data.order_number;
       document.getElementById('success-overlay').classList.add('show');
     } catch (err) {

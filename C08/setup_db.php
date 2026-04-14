@@ -1,39 +1,58 @@
 <?php
-$host = getenv('DB_HOST') ?: '127.0.0.1';
-$user = getenv('DB_USER') ?: 'root';
-$password = getenv('DB_PASSWORD');
-if ($password === false || $password === null) {
-    $password = getenv('DB_PASS') ?: '';
-}
-
+$envHost = getenv('DB_HOST');
+$envUser = getenv('DB_USER');
+$envPassword = getenv('DB_PASSWORD');
 $envDbName = getenv('DB_NAME');
-$dbCandidates = array_values(array_unique(array_filter([
-    $envDbName !== false ? trim((string)$envDbName) : '',
-    'perfume_store',
-    'lumiere',
+$envPort = getenv('DB_PORT');
+
+$hostCandidates = array_values(array_unique(array_filter([
+    $envHost !== false ? trim((string)$envHost) : '',
+    '127.0.0.1',
+    'localhost',
 ])));
 
-$envPort = getenv('DB_PORT');
+$userCandidates = array_values(array_unique(array_filter([
+    $envUser !== false ? trim((string)$envUser) : '',
+    'root',
+])));
+
+$passwordCandidates = array_values(array_unique([
+    $envPassword !== false ? (string)$envPassword : '',
+    '',
+]));
+
+$dbCandidates = array_values(array_unique(array_filter([
+    $envDbName !== false ? trim((string)$envDbName) : '',
+    'lumiere',
+    'perfume_store',
+])));
+
 $portCandidates = [];
 if ($envPort !== false && $envPort !== null && trim((string)$envPort) !== '') {
     $portCandidates[] = (int)$envPort;
 }
-$portCandidates[] = 3307;
 $portCandidates[] = 3306;
+$portCandidates[] = 3307;
 $portCandidates = array_values(array_unique(array_filter($portCandidates, static fn($p) => $p > 0)));
 
 $pdo = null;
 $setupDbError = null;
 
-foreach ($dbCandidates as $dbname) {
+foreach ($hostCandidates as $host) {
     foreach ($portCandidates as $port) {
-        try {
-            $pdo = new PDO("mysql:host=$host;port=$port;dbname=$dbname;charset=utf8mb4", $user, $password);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $setupDbError = null;
-            break 2;
-        } catch (PDOException $e) {
-            $setupDbError = $e->getMessage();
+        foreach ($dbCandidates as $dbname) {
+            foreach ($userCandidates as $user) {
+                foreach ($passwordCandidates as $password) {
+                    try {
+                        $pdo = new PDO("mysql:host=$host;port=$port;dbname=$dbname;charset=utf8mb4", $user, $password);
+                        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                        $setupDbError = null;
+                        break 5;
+                    } catch (PDOException $e) {
+                        $setupDbError = $e->getMessage();
+                    }
+                }
+            }
         }
     }
 }
@@ -43,8 +62,7 @@ if ($pdo instanceof PDO) {
     $defaultCategories = [
         ['name' => 'Nữ', 'description' => 'Sản phẩm dành cho nữ'],
         ['name' => 'Nam', 'description' => 'Sản phẩm dành cho nam'],
-        ['name' => 'Unisex', 'description' => 'Sản phẩm unisex'],
-        ['name' => 'Limited', 'description' => 'Sản phẩm limited edition']
+        ['name' => 'Giới hạn', 'description' => 'Sản phẩm phiên bản giới hạn']
     ];
 
     // Create categories table if not exists
@@ -69,5 +87,9 @@ if ($pdo instanceof PDO) {
             $stmt->execute([$cat['name'], $cat['description']]);
         }
     }
+
+    $pdo->exec("UPDATE categories SET name = 'Giới hạn', description = 'Sản phẩm phiên bản giới hạn' WHERE name = 'Limited'");
+    $pdo->exec("UPDATE products SET category = 'Giới hạn' WHERE category = 'Limited'");
+    $pdo->exec("UPDATE products SET badge = 'Giới hạn' WHERE badge = 'Limited'");
 }
 ?>

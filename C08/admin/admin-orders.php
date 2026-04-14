@@ -1,11 +1,27 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
 
+/** @var PDO $pdo */
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    throw new RuntimeException('Database connection is not available.');
+}
+
 try {
-    $hasWardColumn = (bool)$pdo->query("SHOW COLUMNS FROM orders LIKE 'ward'")->fetch(PDO::FETCH_ASSOC);
-    if (!$hasWardColumn) {
-        $pdo->exec("ALTER TABLE orders ADD COLUMN ward VARCHAR(100) DEFAULT NULL AFTER shipping_address");
+    $columns = [
+        'ward' => "ALTER TABLE orders ADD COLUMN ward VARCHAR(100) DEFAULT NULL AFTER shipping_address",
+        'district' => "ALTER TABLE orders ADD COLUMN district VARCHAR(100) DEFAULT NULL AFTER ward",
+        'city' => "ALTER TABLE orders ADD COLUMN city VARCHAR(100) DEFAULT NULL AFTER district"
+    ];
+
+    foreach ($columns as $columnName => $alterSql) {
+        $hasColumn = (bool)$pdo->query("SHOW COLUMNS FROM orders LIKE '{$columnName}'")->fetch(PDO::FETCH_ASSOC);
+        if (!$hasColumn) {
+            $pdo->exec($alterSql);
+        }
     }
+
+    // Keep status values in DB aligned with current admin workflow.
+    $pdo->exec("UPDATE orders SET status = 'confirmed' WHERE status IN ('processing', 'shipped')");
 } catch (Throwable $e) {
     // Keep page usable even if migration fails.
 }
@@ -35,6 +51,50 @@ function mapLabelToOrderStatus(string $label): ?string
     return $map[$label] ?? null;
 }
 
+function normalizeOrderStatusForWorkflow(string $status): string
+{
+    if (in_array($status, ['processing', 'shipped'], true)) {
+        return 'confirmed';
+    }
+
+    return $status;
+}
+
+function canTransitionOrderStatus(string $fromStatus, string $toStatus): bool
+{
+    $from = normalizeOrderStatusForWorkflow($fromStatus);
+    $to = normalizeOrderStatusForWorkflow($toStatus);
+
+    if ($from === $to) {
+        return true;
+    }
+
+    if ($from === 'pending' && $to === 'confirmed') {
+        return true;
+    }
+
+    if ($from === 'confirmed' && in_array($to, ['delivered', 'cancelled'], true)) {
+        return true;
+    }
+
+    return false;
+}
+
+function getNextStatusOptions(string $currentStatus): array
+{
+    $current = normalizeOrderStatusForWorkflow($currentStatus);
+
+    if ($current === 'pending') {
+        return ['pending', 'confirmed'];
+    }
+
+    if ($current === 'confirmed') {
+        return ['confirmed', 'delivered', 'cancelled'];
+    }
+
+    return [$current];
+}
+
 function formatOrderAddress(?string $shippingAddress, ?string $ward, ?string $district, ?string $city): string
 {
     $shipping = trim((string)$shippingAddress);
@@ -58,6 +118,35 @@ function formatOrderAddress(?string $shippingAddress, ?string $ward, ?string $di
     }
 
     return empty($parts) ? '-' : implode(' - ', $parts);
+}
+
+function normalizeOrderFilterDate(string $rawValue, string $todayDate): string
+{
+    $value = trim($rawValue);
+    if ($value === '') {
+        return '';
+    }
+
+    $formats = ['Y-m-d', 'd/m/Y', 'd-m-Y'];
+    $normalized = null;
+
+    foreach ($formats as $format) {
+        $dt = DateTime::createFromFormat($format, $value);
+        if ($dt instanceof DateTime) {
+            $normalized = $dt->format('Y-m-d');
+            break;
+        }
+    }
+
+    if ($normalized === null) {
+        return '';
+    }
+
+    if ($normalized > $todayDate) {
+        return $todayDate;
+    }
+
+    return $normalized;
 }
 
 function redirectOrders(string $query = ''): void
@@ -85,6 +174,19 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             $errorMessage = 'Dữ liệu cập nhật trạng thái đơn không hợp lệ.';
         } else {
             try {
+                $currentStmt = $pdo->prepare("SELECT status FROM orders WHERE id = ? LIMIT 1");
+                $currentStmt->execute([$orderId]);
+                $currentStatusRaw = $currentStmt->fetchColumn();
+
+                if ($currentStatusRaw === false) {
+                    throw new RuntimeException('Không tìm thấy đơn hàng cần cập nhật.');
+                }
+
+                $currentStatus = (string)$currentStatusRaw;
+                if (!canTransitionOrderStatus($currentStatus, $newStatus)) {
+                    throw new RuntimeException('Chỉ được chuyển trạng thái 1 chiều: Chưa xử lý -> Đã xác nhận -> (Đã giao thành công hoặc Đã hủy).');
+                }
+
                 $stmt = $pdo->prepare("UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?");
                 $stmt->execute([$newStatus, $orderId]);
                 redirectOrders($_POST['keep_query'] ?? 'updated=1');
@@ -100,24 +202,24 @@ if (($_GET['updated'] ?? '') === '1') {
 }
 
 $detailId = (int)($_GET['detail'] ?? 0);
-$keyword = trim($_GET['q'] ?? '');
 $statusFilter = trim($_GET['status'] ?? '');
 $wardFilter = trim($_GET['ward'] ?? '');
-$fromDate = trim($_GET['from_date'] ?? '');
-$toDate = trim($_GET['to_date'] ?? '');
-$sortBy = trim($_GET['sort_by'] ?? 'date');
+$todayDate = date('Y-m-d');
+$fromDate = normalizeOrderFilterDate((string)($_GET['from_date'] ?? ''), $todayDate);
+$toDate = normalizeOrderFilterDate((string)($_GET['to_date'] ?? ''), $todayDate);
+$sortBy = trim($_GET['sort_by'] ?? 'ward_asc');
+
+if ($fromDate !== '' && $toDate !== '' && $fromDate > $toDate) {
+    $fromDate = $toDate;
+}
+
+
+if (!in_array($sortBy, ['ward_asc', 'ward_desc'], true)) {
+    $sortBy = 'ward_asc';
+}
 
 $whereParts = [];
 $params = [];
-
-if ($keyword !== '') {
-    $whereParts[] = "(o.order_number LIKE ? OR o.customer_name LIKE ? OR o.customer_email LIKE ? OR oi.product_name LIKE ?)";
-    $kw = '%' . $keyword . '%';
-    $params[] = $kw;
-    $params[] = $kw;
-    $params[] = $kw;
-    $params[] = $kw;
-}
 
 if ($statusFilter !== '') {
     $statusValue = mapLabelToOrderStatus($statusFilter);
@@ -150,9 +252,9 @@ if (!empty($whereParts)) {
     $whereSql = 'WHERE ' . implode(' AND ', $whereParts);
 }
 
-$orderBy = 'o.created_at DESC, o.id DESC';
-if ($sortBy === 'ward') {
-    $orderBy = 'COALESCE(o.ward, "") ASC, COALESCE(o.district, "") ASC, o.created_at DESC';
+$orderBy = 'COALESCE(o.ward, "") ASC, COALESCE(o.district, "") ASC, o.created_at DESC';
+if ($sortBy === 'ward_desc') {
+    $orderBy = 'COALESCE(o.ward, "") DESC, COALESCE(o.district, "") DESC, o.created_at DESC';
 }
 
 $listSql = "SELECT
@@ -194,7 +296,6 @@ if ($detailId > 0) {
 }
 
 $keepQuery = http_build_query([
-    'q' => $keyword,
     'status' => $statusFilter,
     'ward' => $wardFilter,
     'from_date' => $fromDate,
@@ -227,10 +328,6 @@ $keepQuery = http_build_query([
         <form method="get" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:1rem; align-items:end;">
             <input type="hidden" name="page" value="orders">
             <div>
-                <span class="filter-label">Tìm kiếm</span>
-                <input class="search-inline" type="text" name="q" value="<?php echo htmlspecialchars($keyword); ?>" placeholder="Tên, mã, email, sản phẩm..." style="width:100%;">
-            </div>
-            <div>
                 <span class="filter-label">Trạng thái</span>
                 <select class="search-inline" name="status" style="width:100%;">
                     <option value="">Tất cả</option>
@@ -246,17 +343,17 @@ $keepQuery = http_build_query([
             </div>
             <div>
                 <span class="filter-label">Từ ngày</span>
-                <input class="search-inline" type="date" name="from_date" value="<?php echo htmlspecialchars($fromDate); ?>" style="width:100%;">
+                <input class="search-inline" type="date" id="orders-from-date" name="from_date" max="<?php echo htmlspecialchars($todayDate); ?>" value="<?php echo htmlspecialchars($fromDate); ?>" style="width:100%;">
             </div>
             <div>
                 <span class="filter-label">Đến ngày</span>
-                <input class="search-inline" type="date" name="to_date" value="<?php echo htmlspecialchars($toDate); ?>" style="width:100%;">
+                <input class="search-inline" type="date" id="orders-to-date" name="to_date" max="<?php echo htmlspecialchars($todayDate); ?>" value="<?php echo htmlspecialchars($toDate); ?>" style="width:100%;">
             </div>
             <div>
                 <span class="filter-label">Sắp xếp</span>
                 <select class="search-inline" name="sort_by" style="width:100%;">
-                    <option value="date" <?php echo $sortBy === 'date' ? 'selected' : ''; ?>>Theo thời gian đơn</option>
-                    <option value="ward" <?php echo $sortBy === 'ward' ? 'selected' : ''; ?>>Theo phường giao hàng</option>
+                    <option value="ward_asc" <?php echo $sortBy === 'ward_asc' ? 'selected' : ''; ?>>Theo phường giao hàng (A-Z)</option>
+                    <option value="ward_desc" <?php echo $sortBy === 'ward_desc' ? 'selected' : ''; ?>>Theo phường giao hàng (Z-A)</option>
                 </select>
             </div>
             <div style="display:flex; gap:0.5rem;">
@@ -291,6 +388,8 @@ $keepQuery = http_build_query([
                     </tr>
                 <?php else: ?>
                     <?php foreach ($orders as $order): ?>
+                        <?php $normalizedStatus = normalizeOrderStatusForWorkflow((string)$order['status']); ?>
+                        <?php $nextStatusOptions = getNextStatusOptions((string)$order['status']); ?>
                         <tr>
                             <td class="td-gold"><?php echo htmlspecialchars($order['order_number']); ?></td>
                             <td>
@@ -302,7 +401,7 @@ $keepQuery = http_build_query([
                             <td><?php echo date('d/m/Y H:i', strtotime((string)$order['created_at'])); ?></td>
                             <td><?php echo htmlspecialchars(trim((string)($order['ward'] ?? '')) !== '' ? (($order['ward'] ?? '') . ' / ' . ($order['district'] ?: '-')) : ($order['district'] ?: '-')); ?></td>
                             <td>
-                                <span class="badge <?php echo in_array($order['status'], ['delivered', 'confirmed'], true) ? 'badge-success' : ($order['status'] === 'cancelled' ? 'badge-danger' : 'badge-muted'); ?>">
+                                <span class="badge <?php echo in_array($normalizedStatus, ['delivered', 'confirmed'], true) ? 'badge-success' : ($normalizedStatus === 'cancelled' ? 'badge-danger' : 'badge-muted'); ?>">
                                     <?php echo htmlspecialchars(mapOrderStatusToLabel((string)$order['status'])); ?>
                                 </span>
                             </td>
@@ -312,12 +411,20 @@ $keepQuery = http_build_query([
                                     <input type="hidden" name="order_id" value="<?php echo (int)$order['id']; ?>">
                                     <input type="hidden" name="keep_query" value="<?php echo htmlspecialchars($keepQuery); ?>">
                                     <select class="search-inline" name="new_status">
-                                        <option value="pending" <?php echo $order['status'] === 'pending' ? 'selected' : ''; ?>>Chưa xử lý</option>
-                                        <option value="confirmed" <?php echo $order['status'] === 'confirmed' ? 'selected' : ''; ?>>Đã xác nhận</option>
-                                        <option value="delivered" <?php echo $order['status'] === 'delivered' ? 'selected' : ''; ?>>Đã giao thành công</option>
-                                        <option value="cancelled" <?php echo $order['status'] === 'cancelled' ? 'selected' : ''; ?>>Đã hủy</option>
+                                        <?php if (in_array('pending', $nextStatusOptions, true)): ?>
+                                            <option value="pending" <?php echo $normalizedStatus === 'pending' ? 'selected' : ''; ?>>Chưa xử lý</option>
+                                        <?php endif; ?>
+                                        <?php if (in_array('confirmed', $nextStatusOptions, true)): ?>
+                                            <option value="confirmed" <?php echo $normalizedStatus === 'confirmed' ? 'selected' : ''; ?>>Đã xác nhận</option>
+                                        <?php endif; ?>
+                                        <?php if (in_array('delivered', $nextStatusOptions, true)): ?>
+                                            <option value="delivered" <?php echo $normalizedStatus === 'delivered' ? 'selected' : ''; ?>>Đã giao thành công</option>
+                                        <?php endif; ?>
+                                        <?php if (in_array('cancelled', $nextStatusOptions, true)): ?>
+                                            <option value="cancelled" <?php echo $normalizedStatus === 'cancelled' ? 'selected' : ''; ?>>Đã hủy</option>
+                                        <?php endif; ?>
                                     </select>
-                                    <button class="btn btn-ghost btn-sm" type="submit">Lưu</button>
+                                    <button class="btn btn-ghost btn-sm" type="submit" <?php echo in_array($normalizedStatus, ['delivered', 'cancelled'], true) ? 'disabled' : ''; ?>>Lưu</button>
                                 </form>
                             </td>
                             <td>
@@ -377,12 +484,40 @@ $keepQuery = http_build_query([
 
                     <div class="modal-footer" style="margin-top: 1rem; padding-top: 1rem;">
                         <strong style="margin-right:auto;">Tổng đơn: <?php echo number_format((int)$orderDetail['total_amount'], 0, ',', '.'); ?>₫</strong>
-                        <a class="btn btn-ghost" href="index.php?page=orders&<?php echo htmlspecialchars($keepQuery); ?>">Đãng</a>
                     </div>
                 </div>
             </div>
         </div>
     <?php endif; ?>
 </section>
+
+<script>
+    (function () {
+        const today = '<?php echo htmlspecialchars($todayDate, ENT_QUOTES); ?>';
+        const fromInput = document.getElementById('orders-from-date');
+        const toInput = document.getElementById('orders-to-date');
+
+        const validateOne = (input) => {
+            if (!input) return;
+            const isFuture = !!input.value && input.value > today;
+            if (isFuture) {
+                input.style.borderColor = '#e05050';
+                input.style.background = 'rgba(224, 80, 80, 0.08)';
+                input.setCustomValidity('Không được chọn ngày trong tương lai.');
+            } else {
+                input.style.borderColor = '';
+                input.style.background = '';
+                input.setCustomValidity('');
+            }
+        };
+
+        [fromInput, toInput].forEach((input) => {
+            if (!input) return;
+            input.addEventListener('input', () => validateOne(input));
+            input.addEventListener('change', () => validateOne(input));
+            validateOne(input);
+        });
+    })();
+</script>
 
 

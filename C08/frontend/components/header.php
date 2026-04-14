@@ -4,10 +4,10 @@
 <!-- ══════════ HEADER ══════════ -->
 <header class="site-header">
   <div class="header-inner">
-    <a class="brand" href="#">LUMIERE</a>
+    <a class="brand" href="index.php">LUMIERE</a>
     <nav class="main-nav">
-      <a href="#" class="active" onclick="showSection('home')">Trang chủ</a>
-      <a href="#" onclick="showSection('products')">Sản phẩm</a>
+      <a href="index.php" class="active">Trang chủ</a>
+      <a href="index.php#products">Sản phẩm</a>
     </nav>
     <div class="header-actions">
       <div class="header-greeting" id="header-greeting"></div>

@@ -12,8 +12,8 @@ let state = {
   perPage: 6,
   isSearching: false,
   cart: JSON.parse(localStorage.getItem("lum_cart") || "[]"),
-  user: JSON.parse(localStorage.getItem("lum_user") || "null"),
-  users: JSON.parse(localStorage.getItem("lum_users") || "[]"),
+  user: null,
+  users: [],
   orders: JSON.parse(localStorage.getItem("lum_orders") || "[]"),
 };
 
@@ -50,7 +50,7 @@ function showSection(name) {
 }
 
 // Khởi tạo khi DOM ready
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   // Khởi tạo search input
   initSearchInput();
 
@@ -64,16 +64,23 @@ document.addEventListener("DOMContentLoaded", () => {
   const contact = document.getElementById("contact");
   if (contact) contact.style.display = "none";
 
-  // Cập nhật UI
-  updateCartBadge();
+  // Cập nhật UI và lấy trạng thái đăng nhập từ session/DB
   updateUserUI();
+  if (typeof loadCurrentUserFromDB === "function") {
+    await loadCurrentUserFromDB({ silent: true });
+    updateUserUI();
+  }
 
-  // Tải danh sách sản phẩm
-  loadProducts();
+  if (state.user && typeof loadCartFromDB === "function") {
+    loadCartFromDB(() => updateCartBadge());
+  } else {
+    updateCartBadge();
+  }
 
-  // Vào index.php thì tự mở bảng đăng nhập nếu chưa đăng nhập
-  const isIndexPage = /\/index\.php$/.test(window.location.pathname);
-  if (!state.user && isIndexPage && typeof openAuth === "function") {
-    setTimeout(() => openAuth("login"), 120);
+  // Chỉ nạp dữ liệu nền cho cart/search, không render đè danh sách PHP server-side
+  loadProducts(false);
+
+  if (typeof loadCategories === "function") {
+    loadCategories();
   }
 });

@@ -1,104 +1,35 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
+require_once __DIR__ . '/inventory-report-utils.php';
 
-function ensureReportSchema(PDO $pdo): void
-{
-    $pdo->exec("CREATE TABLE IF NOT EXISTS receipts (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        receipt_code VARCHAR(30) NOT NULL UNIQUE,
-        import_date DATE NOT NULL,
-        import_round INT NOT NULL,
-        status ENUM('draft','completed') NOT NULL DEFAULT 'draft',
-        notes TEXT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP NULL DEFAULT NULL,
-        INDEX idx_import_date (import_date),
-        INDEX idx_status (status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS receipt_items (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        receipt_id INT NOT NULL,
-        product_id INT NOT NULL,
-        import_price INT UNSIGNED NOT NULL,
-        quantity INT UNSIGNED NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_receipt_id (receipt_id),
-        INDEX idx_product_id (product_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-    $checkCode = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'product_code'");
-    $checkCode->execute();
-    if ((int)$checkCode->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN product_code VARCHAR(30) NULL UNIQUE AFTER id");
-        $pdo->exec("UPDATE products SET product_code = CONCAT('SP', LPAD(id, 3, '0')) WHERE product_code IS NULL OR product_code = ''");
-    }
-
-    $checkInitialStock = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'initial_stock'");
-    $checkInitialStock->execute();
-    if ((int)$checkInitialStock->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN initial_stock INT UNSIGNED NOT NULL DEFAULT 0 AFTER image");
-    }
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'report') ? ' active' : ''; ?>" id="page-report">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải báo cáo.
+        </div>
+    </section>
+    <?php
+    return;
 }
 
-ensureReportSchema($pdo);
+ensureInventoryReportSchema($pdo);
 
-$fromDate = trim($_GET['from_date'] ?? date('Y-m-01'));
-$toDate = trim($_GET['to_date'] ?? date('Y-m-d'));
+$todayDate = date('Y-m-d');
+$defaultFromDate = date('Y-m-01');
+
+$fromDate = normalizeFilterDateInput((string)($_GET['from_date'] ?? ''), $defaultFromDate, $todayDate);
+$toDate = normalizeFilterDateInput((string)($_GET['to_date'] ?? ''), $todayDate, $todayDate);
 $categoryFilter = trim($_GET['category'] ?? '');
 $lowThreshold = max(1, (int)($_GET['low_threshold'] ?? 5));
 
-if ($fromDate === '') {
-    $fromDate = date('Y-m-01');
-}
-if ($toDate === '') {
-    $toDate = date('Y-m-d');
+if ($fromDate > $toDate) {
+    $fromDate = $toDate;
 }
 
-$categories = $pdo->query("SELECT name FROM categories ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
 
-$whereCategory = '';
-$params = [$fromDate, $toDate, $fromDate, $toDate];
-if ($categoryFilter !== '') {
-    $whereCategory = 'WHERE p.category = ?';
-    $params[] = $categoryFilter;
-}
-
-$reportSql = "SELECT
-    p.id,
-    COALESCE(p.product_code, CONCAT('SP', LPAD(p.id, 3, '0'))) AS product_code,
-    p.name,
-    p.category,
-    COALESCE(p.initial_stock, 0) AS initial_stock,
-    COALESCE(imp.total_import, 0) AS total_import,
-    COALESCE(exp.total_export, 0) AS total_export,
-    GREATEST(0, COALESCE(p.initial_stock, 0) + COALESCE(imp.total_import, 0) - COALESCE(exp.total_export, 0)) AS net_qty
-FROM products p
-LEFT JOIN (
-    SELECT ri.product_id, SUM(ri.quantity) AS total_import
-    FROM receipt_items ri
-    INNER JOIN receipts r ON r.id = ri.receipt_id
-    WHERE r.status = 'completed'
-      AND DATE(r.import_date) >= ?
-      AND DATE(r.import_date) <= ?
-    GROUP BY ri.product_id
-) imp ON imp.product_id = p.id
-LEFT JOIN (
-    SELECT oi.product_id, SUM(oi.quantity) AS total_export
-    FROM order_items oi
-    INNER JOIN orders o ON o.id = oi.order_id
-        WHERE o.status <> 'cancelled'
-            AND DATE(o.created_at) >= ?
-            AND DATE(o.created_at) <= ?
-    GROUP BY oi.product_id
-) exp ON exp.product_id = p.id
-{$whereCategory}
-ORDER BY p.name ASC";
-
-$reportStmt = $pdo->prepare($reportSql);
-$reportStmt->execute($params);
-$reportRows = $reportStmt->fetchAll(PDO::FETCH_ASSOC);
+$categories = getInventoryReportCategories($pdo);
+$reportRows = buildInventoryReportRows($pdo, $fromDate, $toDate, $categoryFilter);
 
 $summaryImport = 0;
 $summaryExport = 0;
@@ -109,42 +40,7 @@ foreach ($reportRows as $row) {
     $summaryStock += (int)$row['net_qty'];
 }
 
-$warningWhere = '';
-$warningParams = [];
-if ($categoryFilter !== '') {
-    $warningWhere = 'WHERE p.category = ?';
-    $warningParams[] = $categoryFilter;
-}
-
-$warningSql = "SELECT
-    p.id,
-    COALESCE(p.product_code, CONCAT('SP', LPAD(p.id, 3, '0'))) AS product_code,
-    p.name,
-    p.category,
-    GREATEST(0, COALESCE(p.initial_stock, 0) + COALESCE(imp.total_import, 0) - COALESCE(exp.total_export, 0)) AS current_stock
-FROM products p
-LEFT JOIN (
-    SELECT ri.product_id, SUM(ri.quantity) AS total_import
-    FROM receipt_items ri
-    INNER JOIN receipts r ON r.id = ri.receipt_id
-    WHERE r.status = 'completed'
-    GROUP BY ri.product_id
-) imp ON imp.product_id = p.id
-LEFT JOIN (
-    SELECT oi.product_id, SUM(oi.quantity) AS total_export
-    FROM order_items oi
-    INNER JOIN orders o ON o.id = oi.order_id
-    WHERE o.status <> 'cancelled'
-    GROUP BY oi.product_id
-) exp ON exp.product_id = p.id
-{$warningWhere}
-HAVING current_stock <= ?
-ORDER BY current_stock ASC, p.name ASC";
-
-$warningParams[] = $lowThreshold;
-$warningStmt = $pdo->prepare($warningSql);
-$warningStmt->execute($warningParams);
-$warningRows = $warningStmt->fetchAll(PDO::FETCH_ASSOC);
+$warningRows = buildInventoryWarningRows($pdo, $categoryFilter, $lowThreshold);
 ?>
 
 <section class="admin-page<?php echo ($page === 'report') ? ' active' : ''; ?>" id="page-report">
@@ -160,11 +56,11 @@ $warningRows = $warningStmt->fetchAll(PDO::FETCH_ASSOC);
             <input type="hidden" name="page" value="report">
             <div>
                 <span class="filter-label">Từ ngày</span>
-                <input class="search-inline" type="date" name="from_date" value="<?php echo htmlspecialchars($fromDate); ?>" style="width:100%;">
+                <input class="search-inline" type="date" id="report-from-date" name="from_date" max="<?php echo htmlspecialchars($todayDate); ?>" value="<?php echo htmlspecialchars($fromDate); ?>" style="width:100%;">
             </div>
             <div>
                 <span class="filter-label">Đến ngày</span>
-                <input class="search-inline" type="date" name="to_date" value="<?php echo htmlspecialchars($toDate); ?>" style="width:100%;">
+                <input class="search-inline" type="date" id="report-to-date" name="to_date" max="<?php echo htmlspecialchars($todayDate); ?>" value="<?php echo htmlspecialchars($toDate); ?>" style="width:100%;">
             </div>
             <div>
                 <span class="filter-label">Loại sản phẩm</span>
@@ -265,5 +161,34 @@ $warningRows = $warningStmt->fetchAll(PDO::FETCH_ASSOC);
         </table>
     </div>
 </section>
+
+<script>
+    (function () {
+        const today = '<?php echo htmlspecialchars($todayDate, ENT_QUOTES); ?>';
+        const fromInput = document.getElementById('report-from-date');
+        const toInput = document.getElementById('report-to-date');
+
+        const validateOne = (input) => {
+            if (!input) return;
+            const isFuture = !!input.value && input.value > today;
+            if (isFuture) {
+                input.style.borderColor = '#e05050';
+                input.style.background = 'rgba(224, 80, 80, 0.08)';
+                input.setCustomValidity('Không được chọn ngày trong tương lai.');
+            } else {
+                input.style.borderColor = '';
+                input.style.background = '';
+                input.setCustomValidity('');
+            }
+        };
+
+        [fromInput, toInput].forEach((input) => {
+            if (!input) return;
+            input.addEventListener('input', () => validateOne(input));
+            input.addEventListener('change', () => validateOne(input));
+            validateOne(input);
+        });
+    })();
+</script>
 
 

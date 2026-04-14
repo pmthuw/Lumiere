@@ -54,7 +54,7 @@ async function loadProducts() {
       {
         id: 3,
         name: "Tom Ford Black Orchid",
-        category: "Unisex",
+        category: "Nữ",
         price: 6600000,
         desc: "Hương phương Đông bí ẩn, quyến rũ và sang trọng. Kết hợp truffle đen, ylang và orchid đen.",
         notes: "Oriental Floral",
@@ -93,7 +93,7 @@ async function loadProducts() {
       {
         id: 6,
         name: "Jo Malone Peony",
-        category: "Unisex",
+        category: "Nữ",
         price: 8200000,
         desc: "Hương mẫu đơn nhẹ nhàng kết hợp hồng đào và hổ phách mang lại cảm giác tươi mới, sang trọng.",
         notes: "Floral Fruity",
@@ -132,14 +132,14 @@ async function loadProducts() {
       {
         id: 9,
         name: "Maison Margiela Replica",
-        category: "Unisex",
+        category: "Nam",
         price: 8900000,
         desc: '"By the Fireplace" – hương thơm gợi nhớ những đêm bên lò sưởi ấm áp với gỗ và vani dịu dàng.',
         notes: "Woody Floral Musk",
         concentration: "Eau de Toilette",
         size: "100ml",
         brand: "Maison Margiela",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh10.jpg",
       },
       {
@@ -171,40 +171,40 @@ async function loadProducts() {
       {
         id: 12,
         name: "Kilian Angel Share",
-        category: "Unisex",
+        category: "Nam",
         price: 9800000,
         desc: "Lấy cảm hứng từ nghệ thuật ủ rượu cognac, hương thơm kết hợp cinnamon, nutmeg và caramel.",
         notes: "Oriental Woody",
         concentration: "Eau de Parfum",
         size: "50ml",
         brand: "Kilian",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh13.jpg",
       },
       {
         id: 13,
         name: "Million Elixir",
-        category: "Limited",
+        category: "Giới hạn",
         price: 9800000,
         desc: "Một sáng tạo giới hạn với sự hòa quyện của oud, hoa hồng đen và amber, mang đến chiều sâu bí ẩn và cảm giác xa hoa đầy cuốn hút.",
         notes: "Amber Oud",
         concentration: "Extrait de Parfum",
         size: "50ml",
         brand: "Milion",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh14.jpg",
       },
       {
         id: 14,
         name: "Attrape-Rêves",
-        category: "Limited",
+        category: "Giới hạn",
         price: 13350000,
         desc: "Một hương thơm quyến rũ với vải thiều chín mọng, hoa mẫu đơn và cacao nhẹ, tạo nên cảm giác mơ màng, nữ tính và đầy cuốn hút.",
         notes: "Floral Fruity Gourmand",
         concentration: "Eau de Parfum",
         size: "100ml",
         brand: "Attrape",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh15.jpg",
       },
     ];
@@ -512,7 +512,7 @@ function resetSearch() {
   document.getElementById("price-min").value = "";
   document.getElementById("price-max").value = "";
   closeSuggestions();
-  document.getElementById("section-eyebrow").textContent = "Featured Products";
+  document.getElementById("section-eyebrow").textContent = "Sản phẩm nổi bật";
   document.getElementById("section-title").textContent = "Sản phẩm nổi bật";
   renderProducts();
 }
@@ -876,6 +876,7 @@ function openOrders() {
 function openAuth(tab) {
   switchAuthTab(tab);
   openModal("auth-modal");
+  initRegisterAddressSelectors();
   closeUserMenu();
 }
 function switchAuthTab(tab) {
@@ -887,6 +888,132 @@ function switchAuthTab(tab) {
     .forEach((f) => f.classList.remove("active"));
   document.getElementById("tab-" + tab).classList.add("active");
   document.getElementById("form-" + tab).classList.add("active");
+  if (tab === "register") {
+    initRegisterAddressSelectors();
+  }
+}
+
+let registerAddressData = [];
+let registerAddressPromise = null;
+
+function fillSelectOptions(selectEl, options, placeholder) {
+  if (!selectEl) return;
+  const oldValue = selectEl.value;
+  selectEl.innerHTML = "";
+
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = placeholder;
+  selectEl.appendChild(first);
+
+  options.forEach((item) => {
+    const opt = document.createElement("option");
+    opt.value = item;
+    opt.textContent = item;
+    selectEl.appendChild(opt);
+  });
+
+  if (oldValue && options.includes(oldValue)) {
+    selectEl.value = oldValue;
+  }
+}
+
+function normalizeProvinceName(name) {
+  return String(name || "")
+    .replace(/^(Tỉnh|Thành phố)\s+/i, "")
+    .trim();
+}
+
+function getProvinceByName(name) {
+  const target = String(name || "").trim();
+  return (
+    registerAddressData.find((p) => {
+      const raw = String(p?.name || "").trim();
+      const normalized = normalizeProvinceName(raw);
+      return raw === target || normalized === target;
+    }) || null
+  );
+}
+
+function loadRegisterAddressData() {
+  if (registerAddressData.length > 0) {
+    return Promise.resolve(registerAddressData);
+  }
+
+  if (registerAddressPromise) {
+    return registerAddressPromise;
+  }
+
+  registerAddressPromise = fetch("assets/data.json", { cache: "force-cache" })
+    .then((res) => {
+      if (!res.ok) {
+        throw new Error("Unable to load address data");
+      }
+      return res.json();
+    })
+    .then((data) => {
+      registerAddressData = Array.isArray(data) ? data : [];
+      return registerAddressData;
+    })
+    .catch(() => {
+      registerAddressData = [];
+      return registerAddressData;
+    });
+
+  return registerAddressPromise;
+}
+
+function initRegisterAddressSelectors() {
+  const cityEl = document.getElementById("reg-city");
+  const districtEl = document.getElementById("reg-district");
+  const wardEl = document.getElementById("reg-ward");
+
+  if (!cityEl || !districtEl || !wardEl) return;
+  if (cityEl.dataset.boundAddress === "1") return;
+
+  const updateDistricts = () => {
+    const city = cityEl.value;
+    if (!city) {
+      fillSelectOptions(districtEl, [], "Chọn Quận / Huyện");
+      fillSelectOptions(wardEl, [], "Chọn Phường / Xã");
+      return;
+    }
+    const province = getProvinceByName(city);
+    const districts = Array.isArray(province?.districts)
+      ? province.districts.map((d) => d.name).filter(Boolean)
+      : [];
+    fillSelectOptions(districtEl, districts, "Chọn Quận / Huyện");
+    fillSelectOptions(wardEl, [], "Chọn Phường / Xã");
+  };
+
+  const updateWards = () => {
+    const city = cityEl.value;
+    const district = districtEl.value;
+    if (!city || !district) {
+      fillSelectOptions(wardEl, [], "Chọn Phường / Xã");
+      return;
+    }
+    const province = getProvinceByName(city);
+    const districtObj = Array.isArray(province?.districts)
+      ? province.districts.find((d) => d.name === district)
+      : null;
+    const wards = Array.isArray(districtObj?.wards)
+      ? districtObj.wards.map((w) => w.name).filter(Boolean)
+      : [];
+    fillSelectOptions(wardEl, wards, "Chọn Phường / Xã");
+  };
+
+  cityEl.addEventListener("change", updateDistricts);
+  districtEl.addEventListener("change", updateWards);
+  cityEl.dataset.boundAddress = "1";
+
+  loadRegisterAddressData().then((data) => {
+    const cityOptions = data
+      .map((p) => normalizeProvinceName(p?.name))
+      .filter(Boolean);
+    fillSelectOptions(cityEl, cityOptions, "Chọn Tỉnh / Thành phố");
+    updateDistricts();
+  });
 }
 
 function doLogin() {
@@ -914,11 +1041,11 @@ function doRegister() {
   const fields = [
     "reg-lastname",
     "reg-firstname",
-    "reg-username",
     "reg-email",
     "reg-phone",
     "reg-password",
     "reg-address",
+    "reg-ward",
     "reg-district",
     "reg-city",
   ];
@@ -930,14 +1057,21 @@ function doRegister() {
   const [
     lastname,
     firstname,
-    username,
     email,
     phone,
     password,
     address,
+    ward,
     district,
     city,
   ] = vals;
+
+  const baseUsername = email.split("@")[0].replace(/[^a-zA-Z0-9._-]/g, "");
+  let username = baseUsername || `${firstname}${lastname}`.replace(/\s+/g, "");
+  let suffix = 1;
+  while (state.users.find((u) => u.username === username)) {
+    username = `${baseUsername || username}${suffix++}`;
+  }
   if (!/^[0-9]{10}$/.test(phone)) {
     showToast("Số điện thoại phải có đúng 10 chữ số!");
     return;
@@ -947,7 +1081,7 @@ function doRegister() {
     return;
   }
   if (state.users.find((u) => u.email === email || u.username === username)) {
-    showToast("Email hoặc tên đăng nhập đã được đăng ký!");
+    showToast("Email đã được đăng ký!");
     return;
   }
   const user = {
@@ -958,6 +1092,7 @@ function doRegister() {
     phone,
     password,
     address,
+    ward,
     district,
     city,
     role: "customer",

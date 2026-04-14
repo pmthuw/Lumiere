@@ -64,7 +64,7 @@ const DEFAULT_PRODUCTS = [
     id: 3,
     code: "SP003",
     name: "Tom Ford Black Orchid",
-    category: "Unisex",
+    category: "Nữ",
     price: 6600000,
     profitRate: 28,
     desc: "Hương phương Đông bí ẩn với truffle đen và orchid.",
@@ -118,7 +118,7 @@ const DEFAULT_PRODUCTS = [
     id: 6,
     code: "SP006",
     name: "Jo Malone Peony",
-    category: "Unisex",
+    category: "Nữ",
     price: 8200000,
     profitRate: 25,
     desc: "Hương mẫu đơn nhẹ nhàng kết hợp hồng đào và hổ phách.",
@@ -172,7 +172,7 @@ const DEFAULT_PRODUCTS = [
     id: 9,
     code: "SP009",
     name: "Maison Margiela Replica",
-    category: "Unisex",
+    category: "Nam",
     price: 8900000,
     profitRate: 30,
     desc: "By the Fireplace – hương gợi nhớ đêm bên lò sưởi.",
@@ -180,7 +180,7 @@ const DEFAULT_PRODUCTS = [
     concentration: "Eau de Toilette",
     size: "100ml",
     brand: "Maison Margiela",
-    badge: "Limited",
+    badge: "Giới hạn",
     image: "../frontend/images/hinh10.jpg",
     status: "active",
     stock: 0,
@@ -226,7 +226,7 @@ const DEFAULT_PRODUCTS = [
     id: 12,
     code: "SP012",
     name: "Kilian Angel Share",
-    category: "Unisex",
+    category: "Nam",
     price: 9800000,
     profitRate: 32,
     desc: "Cảm hứng cognac với cinnamon, nutmeg và caramel.",
@@ -234,7 +234,7 @@ const DEFAULT_PRODUCTS = [
     concentration: "Eau de Parfum",
     size: "50ml",
     brand: "Kilian",
-    badge: "Limited",
+    badge: "Giới hạn",
     image: "../frontend/images/hinh13.jpg",
     status: "active",
     stock: 0,
@@ -244,7 +244,7 @@ const DEFAULT_PRODUCTS = [
     id: 13,
     code: "SP013",
     name: "Million Elixir",
-    category: "Limited",
+    category: "Giới hạn",
     price: 9800000,
     profitRate: 30,
     desc: "Oud, hoa hồng đen và amber bí ẩn.",
@@ -252,7 +252,7 @@ const DEFAULT_PRODUCTS = [
     concentration: "Extrait de Parfum",
     size: "50ml",
     brand: "Milion",
-    badge: "Limited",
+    badge: "Giới hạn",
     image: "../frontend/images/hinh14.jpg",
     status: "active",
     stock: 0,
@@ -262,7 +262,7 @@ const DEFAULT_PRODUCTS = [
     id: 14,
     code: "SP014",
     name: "Attrape-Rêves",
-    category: "Limited",
+    category: "Giới hạn",
     price: 13350000,
     profitRate: 35,
     desc: "Vải thiều, mẫu đơn và cacao mơ màng nữ tính.",
@@ -270,7 +270,7 @@ const DEFAULT_PRODUCTS = [
     concentration: "Eau de Parfum",
     size: "100ml",
     brand: "Attrape",
-    badge: "Limited",
+    badge: "Giới hạn",
     image: "../frontend/images/hinh15.jpg",
     status: "active",
     stock: 0,
@@ -350,6 +350,23 @@ async function fetchAdminData() {
 }
 
 async function initializeAdminApp() {
+  if (window.ADMIN_DASHBOARD_SERVER_RENDERED) {
+    if (window.ADMIN_SESSION) {
+      const avatar = document.querySelector(".topbar-avatar");
+      const nameLabel = document.querySelector(".topbar-info span:last-child");
+      if (avatar)
+        avatar.textContent = window.ADMIN_SESSION.fullname
+          ? window.ADMIN_SESSION.fullname.charAt(0).toUpperCase()
+          : "A";
+      if (nameLabel)
+        nameLabel.textContent =
+          window.ADMIN_SESSION.fullname ||
+          window.ADMIN_SESSION.username ||
+          "Quản lý";
+    }
+    return;
+  }
+
   const data = await fetchAdminData();
   PRODUCTS = data?.products?.length ? data.products : DEFAULT_PRODUCTS;
   ADMIN_USERS = data?.admin_users?.length
@@ -358,7 +375,7 @@ async function initializeAdminApp() {
   CUSTOMERS = data?.users?.length ? data.users : [];
   CATEGORIES = data?.categories?.length
     ? data.categories
-    : ["Nữ", "Nam", "Unisex", "Limited"];
+    : ["Nữ", "Nam", "Giới hạn"];
   RECEIPTS = data?.receipts?.length ? data.receipts : [];
   ORDERS = data?.orders?.length ? data.orders : [];
   LOW_STOCK = data?.low_stock ?? 5;
@@ -512,6 +529,10 @@ function showPage(name, btn) {
 //  DASHBOARD
 // ══════════════════════════════════════════════════
 function renderDashboard() {
+  if (!document.getElementById("dash-stats")) {
+    return;
+  }
+
   recomputeStock();
   const done = ORDERS.filter((o) => o.status === "Đã giao");
   const revenue = done.reduce((s, o) => s + o.total, 0);

@@ -15,16 +15,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     exit;
 }
 
-$host = getenv('DB_HOST') ?: '127.0.0.1';
-$port = (int)(getenv('DB_PORT') ?: 3307);
-$user = getenv('DB_USER') ?: 'root';
-$password = getenv('DB_PASSWORD') ?: '';
-$dbname = getenv('DB_NAME') ?: 'perfume_store';
+require_once __DIR__ . '/../../setup_db.php';
 
-try {
-    $pdo = new PDO("mysql:host=$host;port=$port;dbname=$dbname;charset=utf8mb4", $user, $password);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch (PDOException $e) {
+if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     echo json_encode(['success' => false, 'message' => 'Database connection failed']);
     exit;
@@ -80,6 +73,19 @@ if ($customerPhone !== '' && !preg_match('/^[0-9]{10}$/', preg_replace('/\s+/', 
 try {
     $pdo->beginTransaction();
 
+    $hasReceiptPricingTables = false;
+    try {
+        $hasReceiptsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipts'")->fetchColumn();
+        $hasReceiptItemsTable = (bool)$pdo->query("SHOW TABLES LIKE 'receipt_items'")->fetchColumn();
+        $hasReceiptPricingTables = $hasReceiptsTable && $hasReceiptItemsTable;
+    } catch (Throwable $e) {
+        $hasReceiptPricingTables = false;
+    }
+
+    $priceJoinSql = '';
+    $avgCostExpr = 'COALESCE(p.avg_import_price, 0)';
+
+
     $resolvedUserId = null;
     if ($userEmail !== '') {
         $userStmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
@@ -95,7 +101,11 @@ try {
     $lineItems = [];
     $totalAmount = 0;
 
-    $productStmt = $pdo->prepare('SELECT id, name, brand, price FROM products WHERE id = ? LIMIT 1');
+    $productStmt = $pdo->prepare("SELECT p.id, p.name, p.brand,
+        ROUND({$avgCostExpr} * (1 + (COALESCE(p.profit_rate, 0) / 100))) AS display_price
+        FROM products p
+        {$priceJoinSql}
+        WHERE p.id = ? LIMIT 1");
     foreach ($items as $item) {
         $productId = (int)($item['id'] ?? 0);
         $qty = max(1, (int)($item['qty'] ?? 0));
@@ -110,7 +120,7 @@ try {
             continue;
         }
 
-        $unitPrice = (int)$product['price'];
+        $unitPrice = (int)$product['display_price'];
         $lineTotal = $unitPrice * $qty;
         $totalAmount += $lineTotal;
 

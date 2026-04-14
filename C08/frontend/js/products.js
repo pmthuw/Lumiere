@@ -4,16 +4,96 @@
 
 const API_BASE = "../backend/api";
 let PRODUCTS = [];
+let CATEGORIES = [];
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildCategoryUrl(category) {
+  const params = new URLSearchParams(window.location.search || "");
+  params.set("page", "1");
+  if (category && String(category).trim() !== "") {
+    params.set("category", category);
+  } else {
+    params.delete("category");
+  }
+  const query = params.toString();
+  return query ? `?${query}#products` : "?page=1#products";
+}
+
+function renderCategoryControls() {
+  const tabs = document.getElementById("category-tabs");
+  const select = document.getElementById("filter-category");
+  if (!tabs && !select) return;
+
+  const selectedCategory = (
+    select?.value ||
+    state.currentCategory ||
+    ""
+  ).trim();
+
+  if (tabs) {
+    const tabItems = [
+      `<a href="${buildCategoryUrl("")}" class="tab-btn ${selectedCategory === "" ? "active" : ""}">Tất cả</a>`,
+      ...CATEGORIES.map(
+        (catName) =>
+          `<a href="${buildCategoryUrl(catName)}" class="tab-btn ${selectedCategory === catName ? "active" : ""}">${escapeHtml(catName)}</a>`,
+      ),
+    ];
+    tabs.innerHTML = tabItems.join("");
+  }
+
+  if (select) {
+    const options = [
+      '<option value="">Tất cả phân loại</option>',
+      ...CATEGORIES.map(
+        (catName) =>
+          `<option value="${escapeHtml(catName)}" ${selectedCategory === catName ? "selected" : ""}>${escapeHtml(catName)}</option>`,
+      ),
+    ];
+    select.innerHTML = options.join("");
+    select.value = selectedCategory;
+  }
+}
+
+async function loadCategories() {
+  try {
+    const response = await fetch(`${API_BASE}/categories.php`);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    CATEGORIES = Array.isArray(payload?.categories) ? payload.categories : [];
+    renderCategoryControls();
+  } catch (error) {
+    console.error("Failed to load categories:", error);
+  }
+}
 
 // Tải danh sách sản phẩm từ API
-async function loadProducts() {
+async function loadProducts(shouldRender = true) {
   try {
     const response = await fetch(`${API_BASE}/products.php`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
-    PRODUCTS = await response.json();
-    renderProducts();
+    const payload = await response.json();
+    if (Array.isArray(payload)) {
+      PRODUCTS = payload;
+    } else if (Array.isArray(payload?.products)) {
+      PRODUCTS = payload.products;
+    } else {
+      PRODUCTS = [];
+      throw new Error(payload?.error || "Invalid products payload");
+    }
+    if (shouldRender) renderProducts();
   } catch (error) {
     console.error("Failed to load products:", error);
     // Fallback to hardcoded data if API fails
@@ -47,7 +127,7 @@ async function loadProducts() {
       {
         id: 3,
         name: "Tom Ford Black Orchid",
-        category: "Unisex",
+        category: "Nữ",
         price: 6600000,
         desc: "Hương phương Đông bí ẩn, quyến rũ và sang trọng. Kết hợp truffle đen, ylang và orchid đen.",
         notes: "Oriental Floral",
@@ -86,7 +166,7 @@ async function loadProducts() {
       {
         id: 6,
         name: "Jo Malone Peony",
-        category: "Unisex",
+        category: "Nữ",
         price: 8200000,
         desc: "Hương mẫu đơn nhẹ nhàng kết hợp hồng đào và hổ phách mang lại cảm giác tươi mới, sang trọng.",
         notes: "Floral Fruity",
@@ -125,14 +205,14 @@ async function loadProducts() {
       {
         id: 9,
         name: "Maison Margiela Replica",
-        category: "Unisex",
+        category: "Nam",
         price: 8900000,
         desc: '"By the Fireplace" – hương thơm gợi nhớ những đêm bên lò sưởi ấm áp với gỗ và vani dịu dàng.',
         notes: "Woody Floral Musk",
         concentration: "Eau de Toilette",
         size: "100ml",
         brand: "Maison Margiela",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh10.jpg",
       },
       {
@@ -164,44 +244,44 @@ async function loadProducts() {
       {
         id: 12,
         name: "Kilian Angel Share",
-        category: "Unisex",
+        category: "Nam",
         price: 9800000,
         desc: "Lấy cảm hứng từ nghệ thuật ủ rượu cognac, hương thơm kết hợp cinnamon, nutmeg và caramel.",
         notes: "Oriental Woody",
         concentration: "Eau de Parfum",
         size: "50ml",
         brand: "Kilian",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh13.jpg",
       },
       {
         id: 13,
         name: "Million Elixir",
-        category: "Limited",
+        category: "Giới hạn",
         price: 9800000,
         desc: "Một sáng tạo giới hạn với sự hòa quyện của oud, hoa hồng đen và amber, mang đến chiều sâu bí ẩn.",
         notes: "Amber Oud",
         concentration: "Extrait de Parfum",
         size: "50ml",
         brand: "Million",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh14.jpg",
       },
       {
         id: 14,
         name: "Attrape-Rêves",
-        category: "Limited",
+        category: "Giới hạn",
         price: 13350000,
         desc: "Một hương thơm quyến rũ với vải thiều chín mọng, hoa mẫu đơn và cacao nhẹ.",
         notes: "Floral Fruity Gourmand",
         concentration: "Eau de Parfum",
         size: "100ml",
         brand: "Attrape",
-        badge: "Limited",
+        badge: "Giới hạn",
         image: "images/hinh15.jpg",
       },
     ];
-    renderProducts();
+    if (shouldRender) renderProducts();
   }
 }
 
@@ -229,11 +309,22 @@ function renderProducts() {
   const pageItems = filtered.slice(start, start + state.perPage);
 
   const grid = document.getElementById("product-grid");
-  document.getElementById("result-count").textContent = `${total} sản phẩm`;
-  document.getElementById("page-info").textContent =
-    total > 0
-      ? `Hiển thị ${start + 1}–${Math.min(start + state.perPage, total)} / ${total} sản phẩm`
-      : "";
+  const resultCountEl = document.getElementById("result-count");
+  if (resultCountEl) {
+    resultCountEl.textContent = `${total} sản phẩm`;
+  }
+
+  const pageInfoEl = document.getElementById("page-info");
+  if (pageInfoEl) {
+    pageInfoEl.textContent =
+      total > 0
+        ? `Hiển thị ${start + 1}–${Math.min(start + state.perPage, total)} / ${total} sản phẩm`
+        : "";
+  }
+
+  if (!grid) {
+    return;
+  }
 
   if (!pageItems.length) {
     grid.innerHTML = `<div class="no-results"><div class="icon">🔍</div><p>Không tìm thấy sản phẩm phù hợp.</p><button class="btn btn-ghost" style="margin-top:1rem" onclick="resetSearch()">Xóa bộ lọc</button></div>`;
@@ -300,18 +391,28 @@ function goPage(p) {
 // Lọc theo danh loại
 function filterCategory(cat, el) {
   state.currentCategory = cat;
+  state.filterCategory = "";
   state.page = 1;
   state.isSearching = false;
   closeSuggestions();
+  const categorySelect = document.getElementById("filter-category");
+  if (categorySelect) {
+    categorySelect.value = cat;
+  }
   document
     .querySelectorAll(".tab-btn")
     .forEach((b) => b.classList.remove("active"));
-  el.classList.add("active");
-  document.getElementById("section-eyebrow").textContent =
-    cat || "All Products";
-  document.getElementById("section-title").textContent = cat
-    ? `Nước hoa ${cat}`
-    : "Tất cả sản phẩm";
+  if (el) {
+    el.classList.add("active");
+  }
+  const sectionEyebrow = document.getElementById("section-eyebrow");
+  if (sectionEyebrow) {
+    sectionEyebrow.textContent = cat || "All Products";
+  }
+  const sectionTitle = document.getElementById("section-title");
+  if (sectionTitle) {
+    sectionTitle.textContent = cat ? `Nước hoa ${cat}` : "Tất cả sản phẩm";
+  }
   renderProducts();
 }
 
@@ -369,3 +470,7 @@ function buyNowFromDetail(id) {
   closeModal("detail-modal");
   openCart();
 }
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadCategories();
+});

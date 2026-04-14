@@ -6,7 +6,7 @@
   <div class="container">
     <div class="hero">
       <div class="hero-copy">
-        <span class="eyebrow">✦ Forest of Scents</span>
+        <span class="eyebrow">✦ Rừng hương thơm</span>
         <h1>Nghệ thuật<br /><em>quyến rũ</em><br />bằng hương thơm.</h1>
         <p>
           LUMIERE mang đến bộ sưu tập nước hoa cao cấp với phong cách hiện
@@ -17,7 +17,7 @@
             Khám phá bộ sưu tập
           </button>
           <button class="btn btn-ghost" onclick="showSection('products')">
-            Best Sellers
+            Bán chạy nhất
           </button>
         </div>
         <div class="hero-stats">

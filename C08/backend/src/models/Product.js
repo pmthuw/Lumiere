@@ -1,16 +1,21 @@
 const { getPool } = require("../db");
 
+const PRICE_EXPR =
+  "ROUND(COALESCE(avg_import_price, 0) * (1 + (COALESCE(profit_rate, 0) / 100)))";
+
 class Product {
   static async findAll() {
     const pool = getPool();
-    const [rows] = await pool.execute("SELECT * FROM products ORDER BY id");
+    const [rows] = await pool.execute(
+      `SELECT p.*, ${PRICE_EXPR} AS price FROM products p ORDER BY p.id`,
+    );
     return rows;
   }
 
   static async findByCategory(category) {
     const pool = getPool();
     const [rows] = await pool.execute(
-      "SELECT * FROM products WHERE category = ? ORDER BY id",
+      `SELECT p.*, ${PRICE_EXPR} AS price FROM products p WHERE p.category = ? ORDER BY p.id`,
       [category],
     );
     return rows;
@@ -18,9 +23,10 @@ class Product {
 
   static async findById(id) {
     const pool = getPool();
-    const [rows] = await pool.execute("SELECT * FROM products WHERE id = ?", [
-      id,
-    ]);
+    const [rows] = await pool.execute(
+      `SELECT p.*, ${PRICE_EXPR} AS price FROM products p WHERE p.id = ?`,
+      [id],
+    );
     return rows[0];
   }
 
@@ -28,7 +34,7 @@ class Product {
     const pool = getPool();
     const searchTerm = `%${query}%`;
     const [rows] = await pool.execute(
-      "SELECT * FROM products WHERE name LIKE ? OR brand LIKE ? OR notes LIKE ? ORDER BY id",
+      `SELECT p.*, ${PRICE_EXPR} AS price FROM products p WHERE p.name LIKE ? OR p.brand LIKE ? OR p.notes LIKE ? ORDER BY p.id`,
       [searchTerm, searchTerm, searchTerm],
     );
     return rows;
@@ -36,20 +42,20 @@ class Product {
 
   static async filterByPrice(min, max) {
     const pool = getPool();
-    let query = "SELECT * FROM products WHERE 1=1";
+    let query = `SELECT p.*, ${PRICE_EXPR} AS price FROM products p WHERE 1=1`;
     const params = [];
 
     if (min !== undefined && min !== "") {
-      query += " AND price >= ?";
+      query += ` AND ${PRICE_EXPR} >= ?`;
       params.push(min);
     }
 
     if (max !== undefined && max !== "") {
-      query += " AND price <= ?";
+      query += ` AND ${PRICE_EXPR} <= ?`;
       params.push(max);
     }
 
-    query += " ORDER BY id";
+    query += " ORDER BY p.id";
 
     const [rows] = await pool.execute(query, params);
     return rows;

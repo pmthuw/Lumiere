@@ -31,7 +31,7 @@
     <script src="js/products.js"></script>
     <script src="js/search.js"></script>
     <script src="js/cart.js"></script>
-    <script src="js/auth.js"></script>
+    <script src="js/auth.js?v=20260413-4"></script>
     <script src="js/orders.js"></script>
     <script src="js/profile.js"></script>
   </body>

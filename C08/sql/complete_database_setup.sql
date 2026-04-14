@@ -16,7 +16,6 @@ CREATE TABLE `products` (
   `id` INT UNSIGNED NOT NULL PRIMARY KEY,
   `name` VARCHAR(255) NOT NULL,
   `category` VARCHAR(60) NOT NULL,
-  `price` INT UNSIGNED NOT NULL,
   `brand` VARCHAR(120) NOT NULL,
   `badge` VARCHAR(60) DEFAULT NULL,
   `notes` VARCHAR(255) DEFAULT NULL,
@@ -24,6 +23,8 @@ CREATE TABLE `products` (
   `size` VARCHAR(60) DEFAULT NULL,
   `image` VARCHAR(255) DEFAULT NULL,
   `initial_stock` INT UNSIGNED NOT NULL DEFAULT 30,
+  `avg_import_price` INT UNSIGNED NOT NULL DEFAULT 0,
+  `profit_rate` DECIMAL(5,2) NOT NULL DEFAULT 30.00,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -35,9 +36,10 @@ CREATE TABLE `users` (
   `username` VARCHAR(100) NOT NULL UNIQUE,
   `email` VARCHAR(255) NOT NULL UNIQUE,
   `password_hash` VARCHAR(255) NOT NULL,
-  `role` ENUM('admin', 'staff', 'customer') DEFAULT 'customer',
+  `original_password` VARCHAR(255) DEFAULT NULL,
   `phone` VARCHAR(20) DEFAULT NULL,
   `address` TEXT DEFAULT NULL,
+  `ward` VARCHAR(100) DEFAULT NULL,
   `district` VARCHAR(100) DEFAULT NULL,
   `city` VARCHAR(100) DEFAULT NULL,
   `status` ENUM('active', 'locked', 'inactive') DEFAULT 'active',
@@ -54,8 +56,8 @@ CREATE TABLE `admin_users` (
   `username` VARCHAR(100) NOT NULL UNIQUE,
   `email` VARCHAR(255) NOT NULL UNIQUE,
   `password_hash` VARCHAR(255) NOT NULL,
+  `original_password` VARCHAR(255) DEFAULT NULL,
   `full_name` VARCHAR(255) NOT NULL,
-  `role` ENUM('admin', 'super_admin') DEFAULT 'admin',
   `status` ENUM('active', 'inactive') DEFAULT 'active',
   `last_login` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -109,38 +111,35 @@ CREATE TABLE `order_items` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Insert products data
-INSERT INTO `products` (`id`, `name`, `category`, `price`, `brand`, `badge`, `notes`, `concentration`, `size`, `image`, `initial_stock`) VALUES
-  (1, 'Chanel No.5', 'Nữ', 7200000, 'Chanel', 'Bestseller', 'Hoa cỏ aldehyde', 'Eau de Parfum', '100ml', 'images/hinh1.jpg', 30),
-  (2, 'Dior Sauvage', 'Nam', 8800000, 'Dior', 'Hot', 'Fougère Woody', 'Eau de Toilette', '100ml', 'images/hinh3.jpg', 30),
-  (3, 'Tom Ford Black Orchid', 'Unisex', 6600000, 'Tom Ford', '', 'Oriental Floral', 'Eau de Parfum', '50ml', 'images/hinh4.jpg', 30),
-  (4, 'YSL Black Opium', 'Nữ', 8400000, 'YSL', 'New', 'Oriental Floral', 'Eau de Parfum', '90ml', 'images/hinh5.jpg', 30),
-  (5, 'Creed Aventus', 'Nam', 14500000, 'Creed', 'Luxury', 'Fruity Chypre', 'Eau de Parfum', '100ml', 'images/hinh6.jpg', 30),
-  (6, 'Jo Malone Peony', 'Unisex', 8200000, 'Jo Malone', '', 'Floral Fruity', 'Cologne', '100ml', 'images/hinh7.jpg', 30),
-  (7, 'Versace Eros', 'Nam', 10800000, 'Versace', '', 'Oriental Fougère', 'Eau de Toilette', '100ml', 'images/hinh8.jpg', 30),
-  (8, 'Gucci Bloom', 'Nữ', 9800000, 'Gucci', '', 'Floral', 'Eau de Parfum', '100ml', 'images/hinh9.jpg', 30),
-  (9, 'Maison Margiela Replica', 'Unisex', 8900000, 'Maison Margiela', 'Limited', 'Woody Floral Musk', 'Eau de Toilette', '100ml', 'images/hinh10.jpg', 30),
-  (10, 'Hermès Terre', 'Nam', 9200000, 'Hermès', '', 'Woody Citrus', 'Eau de Toilette', '75ml', 'images/hinh11.jpg', 30),
-  (11, 'Lancôme La Vie Est Belle', 'Nữ', 11100000, 'Lancôme', '', 'Oriental Floral', 'Eau de Parfum', '75ml', 'images/hinh12.jpg', 30),
-  (12, 'Kilian Angel Share', 'Unisex', 9800000, 'Kilian', 'Limited', 'Oriental Woody', 'Eau de Parfum', '50ml', 'images/hinh13.jpg', 30),
-  (13, 'Million Elixir', 'Limited', 9800000, 'Milion', 'Limited', 'Amber Oud', 'Extrait de Parfum', '50ml', 'images/hinh14.jpg', 30),
-  (14, 'Attrape-Rêves', 'Limited', 13350000, 'Attrape', 'Limited', 'Floral Fruity Gourmand', 'Eau de Parfum', '100ml', 'images/hinh15.jpg', 30);
+INSERT INTO `products` (`id`, `name`, `category`, `brand`, `badge`, `notes`, `concentration`, `size`, `image`, `initial_stock`, `avg_import_price`, `profit_rate`) VALUES
+  (1, 'Chanel No.5', 'Nữ', 'Chanel', 'Bestseller', 'Hoa cỏ aldehyde', 'Eau de Parfum', '100ml', 'images/hinh1.jpg', 30, 5538462, 30.00),
+  (2, 'Dior Sauvage', 'Nam', 'Dior', 'Hot', 'Fougère Woody', 'Eau de Toilette', '100ml', 'images/hinh3.jpg', 30, 6769231, 30.00),
+  (3, 'Tom Ford Black Orchid', 'Nữ', 'Tom Ford', '', 'Oriental Floral', 'Eau de Parfum', '50ml', 'images/hinh4.jpg', 30, 5076923, 30.00),
+  (4, 'YSL Black Opium', 'Nữ', 'YSL', 'New', 'Oriental Floral', 'Eau de Parfum', '90ml', 'images/hinh5.jpg', 30, 6461538, 30.00),
+  (5, 'Creed Aventus', 'Nam', 'Creed', 'Luxury', 'Fruity Chypre', 'Eau de Parfum', '100ml', 'images/hinh6.jpg', 30, 11153846, 30.00),
+  (6, 'Jo Malone Peony', 'Nữ', 'Jo Malone', '', 'Floral Fruity', 'Cologne', '100ml', 'images/hinh7.jpg', 30, 6307692, 30.00),
+  (7, 'Versace Eros', 'Nam', 'Versace', '', 'Oriental Fougère', 'Eau de Toilette', '100ml', 'images/hinh8.jpg', 30, 8307692, 30.00),
+  (8, 'Gucci Bloom', 'Nữ', 'Gucci', '', 'Floral', 'Eau de Parfum', '100ml', 'images/hinh9.jpg', 30, 7538462, 30.00),
+  (9, 'Maison Margiela Replica', 'Nam', 'Maison Margiela', 'Giới hạn', 'Woody Floral Musk', 'Eau de Toilette', '100ml', 'images/hinh10.jpg', 30, 6846154, 30.00),
+  (10, 'Hermès Terre', 'Nam', 'Hermès', '', 'Woody Citrus', 'Eau de Toilette', '75ml', 'images/hinh11.jpg', 30, 7076923, 30.00),
+  (11, 'Lancôme La Vie Est Belle', 'Nữ', 'Lancôme', '', 'Oriental Floral', 'Eau de Parfum', '75ml', 'images/hinh12.jpg', 30, 8538462, 30.00),
+  (12, 'Kilian Angel Share', 'Nam', 'Kilian', 'Giới hạn', 'Oriental Woody', 'Eau de Parfum', '50ml', 'images/hinh13.jpg', 30, 7538462, 30.00),
+  (13, 'Million Elixir', 'Giới hạn', 'Milion', 'Giới hạn', 'Amber Oud', 'Extrait de Parfum', '50ml', 'images/hinh14.jpg', 30, 7538462, 30.00),
+  (14, 'Attrape-Rêves', 'Giới hạn', 'Attrape', 'Giới hạn', 'Floral Fruity Gourmand', 'Eau de Parfum', '100ml', 'images/hinh15.jpg', 30, 10269231, 30.00);
 
--- Insert default admin user (password: admin123)
--- Password hash for 'admin123' using bcrypt
-INSERT INTO `admin_users` (`username`, `email`, `password_hash`, `full_name`, `role`) VALUES
-  ('admin', 'admin@lumier.com', '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj8nJ9VH6lK', 'Administrator', 'super_admin'),
-  ('quanli1', 'quanli1@lumier.com', '$2y$10$Jm3mN4B7M7uVbQYw4QwL1uQnXvJQ5Xv8D8Gk7bP0nZC4v5K1bG1bS', 'Quản lý 1', 'admin');
+-- Password hash for 'abcd1234' using bcrypt
+INSERT INTO `admin_users` (`username`, `email`, `password_hash`, `original_password`, `full_name`) VALUES
+  ('quanli1', 'quanli1@lumier.com', 'abcd1234', 'abcd1234', 'Quản lý 1');
 
 -- Insert sample customer users (optional - for testing)
 -- Password for all sample users: password123
-INSERT INTO `users` (`full_name`, `username`, `email`, `password_hash`, `role`, `phone`, `address`, `district`, `city`) VALUES
-  ('Khách hàng 1', 'khachhang1', 'khachhang1@example.com', '$2y$10$a9OfGT2/S5esDwrImHwjyuyi0ctBHu78IFQRKkue4D15QHmcAupSe', 'customer', '0912345678', '789 Đường KHA1', 'Quận 3', 'TP.HCM');
+INSERT INTO `users` (`full_name`, `username`, `email`, `password_hash`, `original_password`, `phone`, `address`, `ward`, `district`, `city`) VALUES
+  ('Khách hàng 1', 'khachhang1', 'khachhang1@example.com', 'password123', 'password123', '0912345678', '789 Đường KHA1', 'Phường 6', 'Quận 3', 'TP.HCM');
 
 
 -- Create indexes for better performance
 CREATE INDEX `idx_products_category` ON `products` (`category`);
 CREATE INDEX `idx_products_brand` ON `products` (`brand`);
-CREATE INDEX `idx_products_price` ON `products` (`price`);
 CREATE INDEX `idx_orders_customer_email` ON `orders` (`customer_email`);
 CREATE INDEX `idx_order_items_total` ON `order_items` (`total_price`);
 

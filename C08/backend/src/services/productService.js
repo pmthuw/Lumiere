@@ -39,7 +39,7 @@ async function listProducts({ search, gender }) {
       p.name,
       p.brand,
       p.gender,
-      p.price,
+      ROUND(COALESCE(p.avg_import_price, 0) * (1 + (COALESCE(p.profit_rate, 0) / 100))) AS price,
       p.old_price,
       p.badge_type,
       p.image_url,
@@ -50,7 +50,7 @@ async function listProducts({ search, gender }) {
     ORDER BY p.id DESC
     LIMIT 24
     `,
-    params
+    params,
   );
 
   return rows.map((r) => ({
@@ -80,7 +80,7 @@ async function getProductById(id) {
     WHERE p.id = ?
     LIMIT 1
     `,
-    [id]
+    [id],
   );
 
   if (rows.length === 0) {
@@ -118,7 +118,8 @@ async function getProductById(id) {
 async function createProduct(data) {
   const pool = getPool();
 
-  if (data.badge && data.badge !== null) assertAllowed(data.badge, ALLOWED_BADGES, "badge");
+  if (data.badge && data.badge !== null)
+    assertAllowed(data.badge, ALLOWED_BADGES, "badge");
   assertAllowed(data.gender, ALLOWED_GENDERS, "gender");
   if (data.stock < 0) {
     const err = new Error("Invalid stock");
@@ -130,7 +131,7 @@ async function createProduct(data) {
   const [result] = await pool.query(
     `
     INSERT INTO products
-      (name, brand, gender, price, old_price, badge_type, image_url, description, volume_ml, concentration, origin, stock, notes_top, notes_middle, notes_base)
+      (name, brand, gender, avg_import_price, old_price, badge_type, image_url, description, volume_ml, concentration, origin, stock, notes_top, notes_middle, notes_base)
     VALUES
       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
@@ -138,7 +139,10 @@ async function createProduct(data) {
       data.name,
       data.brand,
       data.gender,
-      data.price,
+      Math.round(
+        Number(data.price || 0) /
+          (1 + (Number(data.profitRate || 30) || 30) / 100),
+      ),
       data.oldPrice,
       data.badge || null,
       data.imageUrl,
@@ -150,7 +154,7 @@ async function createProduct(data) {
       data.notesTop,
       data.notesMiddle,
       data.notesBase,
-    ]
+    ],
   );
 
   return { id: result.insertId };
@@ -159,7 +163,8 @@ async function createProduct(data) {
 async function updateProduct(id, data) {
   const pool = getPool();
 
-  if (data.badge && data.badge !== null) assertAllowed(data.badge, ALLOWED_BADGES, "badge");
+  if (data.badge && data.badge !== null)
+    assertAllowed(data.badge, ALLOWED_BADGES, "badge");
   assertAllowed(data.gender, ALLOWED_GENDERS, "gender");
 
   const [result] = await pool.query(
@@ -169,7 +174,7 @@ async function updateProduct(id, data) {
       name = ?,
       brand = ?,
       gender = ?,
-      price = ?,
+      avg_import_price = ?,
       old_price = ?,
       badge_type = ?,
       image_url = ?,
@@ -188,7 +193,10 @@ async function updateProduct(id, data) {
       data.name,
       data.brand,
       data.gender,
-      data.price,
+      Math.round(
+        Number(data.price || 0) /
+          (1 + (Number(data.profitRate || 30) || 30) / 100),
+      ),
       data.oldPrice,
       data.badge || null,
       data.imageUrl,
@@ -201,7 +209,7 @@ async function updateProduct(id, data) {
       data.notesMiddle,
       data.notesBase,
       id,
-    ]
+    ],
   );
 
   if (result.affectedRows === 0) {
@@ -235,7 +243,7 @@ async function listAdminProducts() {
       name,
       brand,
       gender,
-      price,
+      ROUND(COALESCE(avg_import_price, 0) * (1 + (COALESCE(profit_rate, 0) / 100))) AS price,
       old_price,
       badge_type,
       image_url,
@@ -252,7 +260,7 @@ async function listAdminProducts() {
     FROM products
     ORDER BY id DESC
     LIMIT 200
-    `
+    `,
   );
 
   return rows.map((r) => ({
@@ -283,4 +291,3 @@ module.exports = {
   deleteProduct,
   listAdminProducts,
 };
-

@@ -1,69 +1,104 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'users') ? ' active' : ''; ?>" id="page-users">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải quản lý tài khoản.
+        </div>
+    </section>
+    <?php
+    return;
+}
+
 $defaultPassword = '12345';
-$pdo->exec("CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    full_name VARCHAR(255) NOT NULL,
-    username VARCHAR(100) NOT NULL UNIQUE,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
-    role ENUM('admin','staff','customer') NOT NULL DEFAULT 'customer',
-    status ENUM('active','locked') NOT NULL DEFAULT 'active',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-// Ensure compatibility with older schema names
-$columnStmt = $pdo->query("SHOW COLUMNS FROM users LIKE 'full_name'");
-if ($columnStmt->rowCount() === 0) {
-    if ($pdo->query("SHOW COLUMNS FROM users LIKE 'fullname'")->rowCount() > 0) {
-        $pdo->exec("ALTER TABLE users ADD COLUMN full_name VARCHAR(255) NOT NULL AFTER id");
-        $pdo->exec("UPDATE users SET full_name = fullname");
+function ensureUserManagementSchema(PDO $pdo): void
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        username VARCHAR(100) NOT NULL UNIQUE,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        original_password VARCHAR(255) DEFAULT NULL,
+        phone VARCHAR(20) DEFAULT NULL,
+        address TEXT DEFAULT NULL,
+        ward VARCHAR(100) DEFAULT NULL,
+        district VARCHAR(100) DEFAULT NULL,
+        city VARCHAR(100) DEFAULT NULL,
+        status ENUM('active','locked','inactive') NOT NULL DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_username (username),
+        INDEX idx_email (email),
+        INDEX idx_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS admin_users (
+        id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(100) NOT NULL UNIQUE,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        original_password VARCHAR(255) DEFAULT NULL,
+        full_name VARCHAR(255) NOT NULL,
+        status ENUM('active', 'inactive') DEFAULT 'active',
+        last_login TIMESTAMP NULL DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_username (username),
+        INDEX idx_email (email),
+        INDEX idx_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    $hasOriginalPasswordUsers = (bool)$pdo->query("SHOW COLUMNS FROM users LIKE 'original_password'")->fetch(PDO::FETCH_ASSOC);
+    if (!$hasOriginalPasswordUsers) {
+        $pdo->exec("ALTER TABLE users ADD COLUMN original_password VARCHAR(255) DEFAULT NULL AFTER password_hash");
     }
+
+    $columns = [
+        'phone' => "ALTER TABLE users ADD COLUMN phone VARCHAR(20) DEFAULT NULL AFTER original_password",
+        'address' => "ALTER TABLE users ADD COLUMN address TEXT DEFAULT NULL AFTER phone",
+        'ward' => "ALTER TABLE users ADD COLUMN ward VARCHAR(100) DEFAULT NULL AFTER address",
+        'district' => "ALTER TABLE users ADD COLUMN district VARCHAR(100) DEFAULT NULL AFTER ward",
+        'city' => "ALTER TABLE users ADD COLUMN city VARCHAR(100) DEFAULT NULL AFTER district",
+    ];
+
+    foreach ($columns as $name => $sql) {
+        $exists = (bool)$pdo->query("SHOW COLUMNS FROM users LIKE '{$name}'")->fetch(PDO::FETCH_ASSOC);
+        if (!$exists) {
+            try {
+                $pdo->exec($sql);
+            } catch (Exception $e) {
+                // Column might already exist or other error; continue
+            }
+        }
+    }
+
+    $hasOriginalPasswordAdmins = (bool)$pdo->query("SHOW COLUMNS FROM admin_users LIKE 'original_password'")->fetch(PDO::FETCH_ASSOC);
+    if (!$hasOriginalPasswordAdmins) {
+        $pdo->exec("ALTER TABLE admin_users ADD COLUMN original_password VARCHAR(255) DEFAULT NULL AFTER password_hash");
+    }
+
+    $pdo->exec("UPDATE users SET original_password = password_hash WHERE (original_password IS NULL OR original_password = '') AND password_hash <> ''");
+    $pdo->exec("UPDATE admin_users SET original_password = password_hash WHERE (original_password IS NULL OR original_password = '') AND password_hash <> ''");
 }
 
-$columnStmt = $pdo->query("SHOW COLUMNS FROM users LIKE 'username'");
-if ($columnStmt->rowCount() === 0) {
-    if ($pdo->query("SHOW COLUMNS FROM users LIKE 'email'")->rowCount() > 0) {
-        $pdo->exec("ALTER TABLE users ADD COLUMN username VARCHAR(100) NULL AFTER full_name");
-        $pdo->exec("UPDATE users SET username = CASE
-            WHEN email IS NOT NULL AND email <> '' THEN email
-            ELSE CONCAT('user', id)
-        END");
-        $pdo->exec("UPDATE users SET username = CONCAT('user', id) WHERE username IS NULL OR username = ''");
-        $pdo->exec("ALTER TABLE users MODIFY username VARCHAR(100) NOT NULL");
-        $pdo->exec("ALTER TABLE users ADD UNIQUE INDEX idx_users_username (username)");
-    }
+function normalizeScope(string $scope): string
+{
+    return $scope === 'admin' ? 'admin' : 'customer';
 }
 
-$columnStmt = $pdo->query("SHOW COLUMNS FROM users LIKE 'password_hash'");
-if ($columnStmt->rowCount() === 0) {
-    if ($pdo->query("SHOW COLUMNS FROM users LIKE 'password'")->rowCount() > 0) {
-        $pdo->exec("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL AFTER email");
-        $pdo->exec("UPDATE users SET password_hash = password");
+function isLockedStatus(string $status, string $scope): bool
+{
+    if ($scope === 'admin') {
+        return $status !== 'active';
     }
+
+    return in_array($status, ['locked', 'inactive'], true);
 }
 
-  // Ensure role enum supports staff and status supports locked/inactive compatibility
-  try {
-    $roleInfo = $pdo->query("SHOW COLUMNS FROM users LIKE 'role'")->fetch(PDO::FETCH_ASSOC);
-    $roleType = strtolower((string)($roleInfo['Type'] ?? ''));
-    if (strpos($roleType, "'staff'") === false) {
-      $pdo->exec("ALTER TABLE users MODIFY role ENUM('admin','staff','customer') NOT NULL DEFAULT 'customer'");
-    }
-  } catch (Throwable $e) {
-    // Keep page usable if schema migration cannot be applied.
-  }
-
-  try {
-    $statusInfo = $pdo->query("SHOW COLUMNS FROM users LIKE 'status'")->fetch(PDO::FETCH_ASSOC);
-    $statusType = strtolower((string)($statusInfo['Type'] ?? ''));
-    if (strpos($statusType, "'locked'") === false || strpos($statusType, "'inactive'") === false) {
-      $pdo->exec("ALTER TABLE users MODIFY status ENUM('active','locked','inactive') NOT NULL DEFAULT 'active'");
-    }
-  } catch (Throwable $e) {
-    // Keep page usable if schema migration cannot be applied.
-  }
+ensureUserManagementSchema($pdo);
 
 $successMessage = null;
 $errorMessage = null;
@@ -72,53 +107,47 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     $action = '';
     if (isset($_POST['add_user'])) {
         $action = 'add';
-    } elseif (isset($_POST['update_user'])) {
-        $action = 'update';
     } elseif (isset($_POST['toggle_status'])) {
         $action = 'toggle';
     } elseif (isset($_POST['reset_password'])) {
         $action = 'reset';
     }
 
-    if ($action === 'add' || $action === 'update') {
-        $fullname = trim($_POST['fullname'] ?? '');
-        $username = trim($_POST['username'] ?? '');
-        $email = trim($_POST['email'] ?? '');
-      $roleRaw = trim((string)($_POST['role'] ?? 'customer'));
-      $role = in_array($roleRaw, ['admin', 'staff', 'customer'], true) ? $roleRaw : 'customer';
-        $password = trim($_POST['password'] ?? '');
-        $id = (int)($_POST['user_id'] ?? 0);
+    if ($action === 'add') {
+        $scope = normalizeScope((string)($_POST['account_scope'] ?? 'customer'));
+        $fullname = trim((string)($_POST['fullname'] ?? ''));
+        $username = trim((string)($_POST['username'] ?? ''));
+        $email = trim((string)($_POST['email'] ?? ''));
+        $password = trim((string)($_POST['password'] ?? ''));
 
-      if ($action === 'add' && (!$fullname || !$username || !$email)) {
-        $errorMessage = 'Vui lòng điền đầy đủ thàng tin bắt buộc.';
-        } elseif ($action === 'update' && (!$fullname || !$username || !$email || $id <= 0)) {
-            $errorMessage = 'Dữ liệu không hợp lệ cho cập nhật tài khoản.';
+        if ($fullname === '' || $username === '' || $email === '') {
+            $errorMessage = 'Vui lòng điền đầy đủ thông tin bắt buộc.';
         } else {
-            $checkStmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE (username = ? OR email = ?) AND id <> ?");
-            $checkStmt->execute([$username, $email, $id]);
-            if ($checkStmt->fetchColumn() > 0) {
-                $errorMessage = 'Tên đăng nhập hoặc email đã được sử dụng.';
-            } else {
-                if ($action === 'add') {
-                $plainPassword = $password !== '' ? $password : $defaultPassword;
-                $hash = password_hash($plainPassword, PASSWORD_DEFAULT);
-                    $insert = $pdo->prepare("INSERT INTO users (full_name, username, email, password_hash, role, status) VALUES (?, ?, ?, ?, ?, 'active')");
-                    $insert->execute([$fullname, $username, $email, $hash, $role]);
-                if ($password === '') {
-                  $successMessage = "Đã tạo tài khoản thành công. Mật khẩu khởi tạo: $defaultPassword";
+            $plainPassword = $password !== '' ? $password : $defaultPassword;
+
+            if ($scope === 'admin') {
+                $checkStmt = $pdo->prepare('SELECT COUNT(*) FROM admin_users WHERE username = ? OR email = ?');
+                $checkStmt->execute([$username, $email]);
+                if ((int)$checkStmt->fetchColumn() > 0) {
+                    $errorMessage = 'Tên đăng nhập hoặc email admin đã được sử dụng.';
                 } else {
-                  $successMessage = 'Đã tạo tài khoản thành công.';
+                    $insert = $pdo->prepare("INSERT INTO admin_users (full_name, username, email, password_hash, original_password, status) VALUES (?, ?, ?, ?, ?, 'active')");
+                    $insert->execute([$fullname, $username, $email, $plainPassword, $plainPassword]);
+                    $successMessage = $password === ''
+                        ? "Đã tạo tài khoản admin thành công. Mật khẩu khởi tạo: $defaultPassword"
+                        : 'Đã tạo tài khoản admin thành công.';
                 }
+            } else {
+                $checkStmt = $pdo->prepare('SELECT COUNT(*) FROM users WHERE username = ? OR email = ?');
+                $checkStmt->execute([$username, $email]);
+                if ((int)$checkStmt->fetchColumn() > 0) {
+                    $errorMessage = 'Tên đăng nhập hoặc email đã được sử dụng.';
                 } else {
-                    $fields = ['full_name = ?', 'username = ?', 'email = ?', 'role = ?'];
-                    $params = [$fullname, $username, $email, $role, $id];
-                    if ($password !== '') {
-                        $fields[] = 'password_hash = ?';
-                        $params = [$fullname, $username, $email, $role, password_hash($password, PASSWORD_DEFAULT), $id];
-                    }
-                    $update = $pdo->prepare('UPDATE users SET ' . implode(', ', $fields) . ' WHERE id = ?');
-                    $update->execute($params);
-                    $successMessage = 'Đã cập nhật tài khoản thành công.';
+                    $insert = $pdo->prepare("INSERT INTO users (full_name, username, email, password_hash, original_password, status) VALUES (?, ?, ?, ?, ?, 'active')");
+                    $insert->execute([$fullname, $username, $email, $plainPassword, $plainPassword]);
+                    $successMessage = $password === ''
+                        ? "Đã tạo tài khoản thành công. Mật khẩu khởi tạo: $defaultPassword"
+                        : 'Đã tạo tài khoản thành công.';
                 }
             }
         }
@@ -126,186 +155,219 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
     if ($action === 'toggle') {
         $id = (int)($_POST['user_id'] ?? 0);
+        $scope = normalizeScope((string)($_POST['account_scope'] ?? 'customer'));
+
         if ($id > 0) {
-            $userStmt = $pdo->prepare('SELECT status FROM users WHERE id = ?');
-            $userStmt->execute([$id]);
-            $user = $userStmt->fetch(PDO::FETCH_ASSOC);
-            if ($user) {
-          $currentStatus = (string)($user['status'] ?? 'active');
-          $isLocked = in_array($currentStatus, ['locked', 'inactive'], true);
-          $newStatus = $isLocked ? 'active' : 'locked';
-                $pdo->prepare('UPDATE users SET status = ? WHERE id = ?')->execute([$newStatus, $id]);
-                $successMessage = $newStatus === 'active' ? 'Đã mở khóa tài khoản.' : 'Đã khóa tài khoản.';
+            if ($scope === 'admin') {
+                $stmt = $pdo->prepare('SELECT status FROM admin_users WHERE id = ?');
+                $stmt->execute([$id]);
+                $current = (string)($stmt->fetchColumn() ?: '');
+                if ($current !== '') {
+                    $newStatus = $current === 'active' ? 'inactive' : 'active';
+                    $pdo->prepare('UPDATE admin_users SET status = ? WHERE id = ?')->execute([$newStatus, $id]);
+                    $successMessage = $newStatus === 'active' ? 'Đã mở khóa tài khoản admin.' : 'Đã khóa tài khoản admin.';
+                }
+            } else {
+                $stmt = $pdo->prepare('SELECT status FROM users WHERE id = ?');
+                $stmt->execute([$id]);
+                $current = (string)($stmt->fetchColumn() ?: '');
+                if ($current !== '') {
+                    $newStatus = isLockedStatus($current, 'customer') ? 'active' : 'locked';
+                    $pdo->prepare('UPDATE users SET status = ? WHERE id = ?')->execute([$newStatus, $id]);
+                    $successMessage = $newStatus === 'active' ? 'Đã mở khóa tài khoản.' : 'Đã khóa tài khoản.';
+                }
             }
         }
     }
 
     if ($action === 'reset') {
         $id = (int)($_POST['user_id'] ?? 0);
-        if ($id > 0) {
-            $hash = password_hash($defaultPassword, PASSWORD_DEFAULT);
-            $stmt = $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
-            $stmt->execute([$hash, $id]);
-            $successMessage = "Đã khởi tạo mật khẩu thành công: $defaultPassword";
+        $scope = normalizeScope((string)($_POST['account_scope'] ?? 'customer'));
+
+        if ($id <= 0) {
+            $errorMessage = 'User ID không hợp lệ.';
+        } else {
+            $table = $scope === 'admin' ? 'admin_users' : 'users';
+            $stmt = $pdo->prepare("SELECT original_password, password_hash FROM {$table} WHERE id = ?");
+            $stmt->execute([$id]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$row) {
+                $errorMessage = 'Không tìm thấy người dùng để reset mật khẩu.';
+            } else {
+                $resetPassword = trim((string)($row['original_password'] ?? ''));
+                if ($resetPassword === '') {
+                    $resetPassword = $defaultPassword;
+                }
+
+                $currentPassword = (string)($row['password_hash'] ?? '');
+                $updateStmt = $pdo->prepare("UPDATE {$table} SET password_hash = ? WHERE id = ?");
+                $updateOk = $updateStmt->execute([$resetPassword, $id]);
+
+                if (!$updateOk) {
+                    $errorMessage = 'Có lỗi khi cập nhật mật khẩu.';
+                } elseif ($currentPassword === $resetPassword) {
+                    $successMessage = 'Mật khẩu đã ở đúng mật khẩu gốc.';
+                } else {
+                    $successMessage = 'Đã reset mật khẩu về mật khẩu lúc đăng ký.';
+                }
+            }
         }
     }
 }
 
-$editUser = null;
-if (isset($_GET['edit_id'])) {
-    $editId = (int)$_GET['edit_id'];
-    if ($editId > 0) {
-        $stmt = $pdo->prepare('SELECT id, full_name AS fullname, username, email, role, status FROM users WHERE id = ?');
-        $stmt->execute([$editId]);
-        $editUser = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
-    }
+$customerUsers = $pdo->query("SELECT id, full_name, username, email, status, created_at, 'customer' AS account_scope FROM users ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+$adminUsers = $pdo->query("SELECT id, full_name, username, email, status, created_at, 'admin' AS account_scope FROM admin_users ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+
+$accounts = array_merge($adminUsers, $customerUsers);
+usort($accounts, static function (array $a, array $b): int {
+    return strcmp((string)($b['created_at'] ?? ''), (string)($a['created_at'] ?? ''));
+});
+
+function accountScopeLabel(string $scope): string
+{
+    return $scope === 'admin' ? 'Admin' : 'Người dùng';
 }
 
-$users = $pdo->query('SELECT id, full_name AS fullname, username, email, role, status, created_at FROM users ORDER BY created_at DESC')->fetchAll(PDO::FETCH_ASSOC);
-function roleLabel($role) {
-    return $role === 'admin' ? 'Quản lý' : ($role === 'staff' ? 'Nhân viên' : 'Khách hàng');
+function statusLabel(string $status, string $scope): string
+{
+    if ($scope === 'admin') {
+        return $status === 'active' ? 'Hoạt động' : 'Đã khóa';
+    }
+
+    return in_array($status, ['active'], true) ? 'Hoạt động' : 'Đã khóa';
 }
-function roleBadge($role) {
-    return $role === 'admin' ? 'badge-gold' : ($role === 'staff' ? 'badge-muted' : 'badge-muted');
-}
-function statusLabel($status) {
-  return $status === 'active' ? 'Hoạt động' : 'Đã khóa';
-}
-function statusBadge($status) {
-  return $status === 'active' ? 'badge-success' : 'badge-danger';
+
+function statusBadge(string $status, string $scope): string
+{
+    if ($scope === 'admin') {
+        return $status === 'active' ? 'badge-success' : 'badge-danger';
+    }
+
+    return in_array($status, ['active'], true) ? 'badge-success' : 'badge-danger';
 }
 ?>
-        <!-- ─── USERS ─── -->
-        <section class="admin-page<?php echo ($page === 'users') ? ' active' : ''; ?>" id="page-users">
-          <div class="page-header">
-            <div class="page-header-left">
-              <span class="eyebrow">✦ Hệ thống</span>
-              <h1>Quản lý khách hàng</h1>
-            </div>
-          </div>
+<section class="admin-page<?php echo ($page === 'users') ? ' active' : ''; ?>" id="page-users">
+    <div class="page-header">
+        <div class="page-header-left">
+            <span class="eyebrow">✦ Hệ thống</span>
+            <h1>Quản lý tài khoản người dùng và admin</h1>
+        </div>
+    </div>
 
-          <?php if ($successMessage): ?>
-            <div style="background: rgba(0, 255, 0, 0.1); border: 1px solid green; color: green; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
-              <?php echo htmlspecialchars($successMessage); ?>
-            </div>
-          <?php endif; ?>
+    <?php if ($successMessage): ?>
+        <div style="background: rgba(0, 255, 0, 0.1); border: 1px solid green; color: green; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            <?php echo htmlspecialchars($successMessage); ?>
+        </div>
+    <?php endif; ?>
 
-          <?php if ($errorMessage): ?>
-            <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
-              <?php echo htmlspecialchars($errorMessage); ?>
-            </div>
-          <?php endif; ?>
+    <?php if ($errorMessage): ?>
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            <?php echo htmlspecialchars($errorMessage); ?>
+        </div>
+    <?php endif; ?>
 
-          <div style="display: grid; grid-template-columns: 1.9fr 1fr; gap: 1.5rem; align-items: start;">
-            <div class="table-wrap">
-              <div class="table-toolbar">
+    <div style="display: grid; grid-template-columns: 1.9fr 1fr; gap: 1.5rem; align-items: start;">
+        <div class="table-wrap">
+            <div class="table-toolbar">
                 <h3>Danh sách tài khoản</h3>
-              </div>
-              <table>
+            </div>
+            <table>
                 <thead>
-                  <tr>
-                    <th>Họ tên</th>
-                    <th>Tên đăng nhập</th>
-                    <th>Email</th>
-                    <th>Vai trò</th>
-                    <th>Trạng thái</th>
-                    <th>Ngày tạo</th>
-                    <th>Thao tác</th>
-                  </tr>
+                    <tr>
+                        <th>Loại</th>
+                        <th>Họ tên</th>
+                        <th>Tên đăng nhập</th>
+                        <th>Email</th>
+                        <th>Trạng thái</th>
+                        <th>Ngày tạo</th>
+                        <th>Thao tác</th>
+                    </tr>
                 </thead>
                 <tbody>
-                  <?php if (empty($users)): ?>
-                    <tr>
-                      <td colspan="7" class="td-muted" style="text-align:center;">Chưa có tài khoản nào.</td>
-                    </tr>
-                  <?php else: ?>
-                    <?php foreach ($users as $user): ?>
-                      <tr>
-                        <td class="td-name"><?php echo htmlspecialchars($user['fullname']); ?></td>
-                        <td class="td-muted"><?php echo htmlspecialchars($user['username']); ?></td>
-                        <td class="td-muted"><?php echo htmlspecialchars($user['email']); ?></td>
-                        <td><span class="badge <?php echo roleBadge($user['role']); ?>"><?php echo roleLabel($user['role']); ?></span></td>
-                        <td><span class="badge <?php echo statusBadge($user['status']); ?>"><?php echo statusLabel($user['status']); ?></span></td>
-                        <td class="td-muted"><?php echo date('d/m/Y H:i', strtotime($user['created_at'])); ?></td>
-                        <td>
-                          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                            <a class="btn btn-ghost btn-sm" href="index.php?page=users&amp;edit_id=<?php echo $user['id']; ?>">✏ Sửa</a>
-                            <form method="post" style="display:inline;">
-                              <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>" />
-                              <button type="submit" name="reset_password" class="btn btn-ghost btn-sm">Khoi tao</button>
-                            </form>
-                            <form method="post" style="display:inline;">
-                              <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>" />
-                              <?php $isLocked = in_array((string)$user['status'], ['locked', 'inactive'], true); ?>
-                              <button type="submit" name="toggle_status" class="btn btn-sm <?php echo !$isLocked ? 'btn-danger' : 'btn-ghost'; ?>">
-                                <?php echo !$isLocked ? 'Khoa' : 'Mo'; ?>
-                              </button>
-                            </form>
-                          </div>
-                        </td>
-                      </tr>
-                    <?php endforeach; ?>
-                  <?php endif; ?>
+                    <?php if (empty($accounts)): ?>
+                        <tr>
+                            <td colspan="7" class="td-muted" style="text-align:center;">Chưa có tài khoản nào.</td>
+                        </tr>
+                    <?php else: ?>
+                        <?php foreach ($accounts as $acc): ?>
+                            <?php $scope = (string)($acc['account_scope'] ?? 'customer'); ?>
+                            <?php $locked = isLockedStatus((string)($acc['status'] ?? ''), $scope); ?>
+                            <tr>
+                                <td><span class="badge badge-muted"><?php echo htmlspecialchars(accountScopeLabel($scope)); ?></span></td>
+                                <td class="td-name"><?php echo htmlspecialchars((string)($acc['full_name'] ?? '')); ?></td>
+                                <td class="td-muted"><?php echo htmlspecialchars((string)($acc['username'] ?? '')); ?></td>
+                                <td class="td-muted"><?php echo htmlspecialchars((string)($acc['email'] ?? '')); ?></td>
+                                <td><span class="badge <?php echo statusBadge((string)($acc['status'] ?? ''), $scope); ?>"><?php echo htmlspecialchars(statusLabel((string)($acc['status'] ?? ''), $scope)); ?></span></td>
+                                <td class="td-muted"><?php echo date('d/m/Y H:i', strtotime((string)($acc['created_at'] ?? 'now'))); ?></td>
+                                <td>
+                                    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                                        <form method="post" style="display:inline;">
+                                            <input type="hidden" name="user_id" value="<?php echo (int)($acc['id'] ?? 0); ?>" />
+                                            <input type="hidden" name="account_scope" value="<?php echo htmlspecialchars($scope); ?>" />
+                                            <button type="submit" name="reset_password" class="btn btn-ghost btn-sm">Reset mật khẩu gốc</button>
+                                        </form>
+                                        <form method="post" style="display:inline;">
+                                            <input type="hidden" name="user_id" value="<?php echo (int)($acc['id'] ?? 0); ?>" />
+                                            <input type="hidden" name="account_scope" value="<?php echo htmlspecialchars($scope); ?>" />
+                                            <button type="submit" name="toggle_status" class="btn btn-sm <?php echo !$locked ? 'btn-danger' : 'btn-ghost'; ?>">
+                                                <?php echo !$locked ? 'Khóa' : 'Mở khóa'; ?>
+                                            </button>
+                                        </form>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
                 </tbody>
-              </table>
-            </div>
+            </table>
+        </div>
 
-            <div class="table-wrap" style="padding: 1.75rem;">
-              <?php if ($editUser): ?>
-                <h3 style="font-family: 'Playfair Display', serif; font-size: 1.1rem; margin-bottom: 1.5rem;">Chỉnh sửa tài khoản</h3>
-              <?php else: ?>
-                <h3 style="font-family: 'Playfair Display', serif; font-size: 1.1rem; margin-bottom: 1.5rem;">Thêm tài khoản mới</h3>
-              <?php endif; ?>
+        <div class="table-wrap" style="padding: 1.75rem;">
+            <h3 style="font-family: 'Playfair Display', serif; font-size: 1.1rem; margin-bottom: 1.5rem;">Thêm tài khoản mới</h3>
 
-              <form method="post">
-                <input type="hidden" name="user_id" value="<?php echo htmlspecialchars($editUser['id'] ?? ''); ?>" />
+            <form method="post">
                 <div class="form-row">
-                  <div class="form-group">
-                    <label>Họ tên</label>
-                    <input class="form-control" name="fullname" type="text" value="<?php echo htmlspecialchars($editUser['fullname'] ?? ''); ?>" required />
-                  </div>
+                    <div class="form-group">
+                        <label>Loại tài khoản</label>
+                        <select class="form-control" name="account_scope">
+                            <option value="customer">Người dùng</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="form-row">
-                  <div class="form-group">
-                    <label>Tên đăng nhập</label>
-                    <input class="form-control" name="username" type="text" value="<?php echo htmlspecialchars($editUser['username'] ?? ''); ?>" required />
-                  </div>
+                    <div class="form-group">
+                        <label>Họ tên</label>
+                        <input class="form-control" name="fullname" type="text" required />
+                    </div>
                 </div>
                 <div class="form-row">
-                  <div class="form-group">
-                    <label>Email</label>
-                    <input class="form-control" name="email" type="email" value="<?php echo htmlspecialchars($editUser['email'] ?? ''); ?>" required />
-                  </div>
+                    <div class="form-group">
+                        <label>Tên đăng nhập</label>
+                        <input class="form-control" name="username" type="text" required />
+                    </div>
                 </div>
                 <div class="form-row">
-                  <div class="form-group">
-                    <label>Vai trò</label>
-                    <select class="form-control" name="role">
-                      <option value="customer" <?php echo (isset($editUser['role']) && $editUser['role'] === 'customer') ? 'selected' : ''; ?>>Khách hàng</option>
-                      <option value="staff" <?php echo (isset($editUser['role']) && $editUser['role'] === 'staff') ? 'selected' : ''; ?>>Nhân viên</option>
-                      <option value="admin" <?php echo (isset($editUser['role']) && $editUser['role'] === 'admin') ? 'selected' : ''; ?>>Quản lý</option>
-                    </select>
-                  </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input class="form-control" name="email" type="email" required />
+                    </div>
                 </div>
                 <div class="form-row">
-                  <div class="form-group">
-                    <label>Mật khẩu <?php echo $editUser ? '(Để trống nếu không đổi)' : '(để trống sẽ dòng mật khẩu khởi tạo)'; ?></label>
-                    <input class="form-control" name="password" type="text" placeholder="<?php echo $editUser ? 'Mật khẩu mới (nếu muốn)' : 'Mật khẩu (tùy chọn)'; ?>" />
-                  </div>
+                    <div class="form-group">
+                        <label>Mật khẩu (để trống để dùng mặc định)</label>
+                        <input class="form-control" name="password" type="text" placeholder="Mật khẩu tùy chọn" />
+                    </div>
                 </div>
-                <button type="submit" name="<?php echo $editUser ? 'update_user' : 'add_user'; ?>" class="btn btn-gold">
-                  <?php echo $editUser ? 'Cập nhật tài khoản' : 'Thêm tài khoản'; ?>
-                </button>
-                <?php if ($editUser): ?>
-                  <a href="index.php?page=users" class="btn btn-ghost">Hủy</a>
-                <?php endif; ?>
-              </form>
+                <button type="submit" name="add_user" class="btn btn-gold">Thêm tài khoản</button>
+            </form>
 
-              <div style="margin-top: 1.5rem; font-size: 0.9rem; color: var(--muted);">
+            <div style="margin-top: 1.5rem; font-size: 0.9rem; color: var(--muted);">
                 <p>Mật khẩu mặc định khi khởi tạo: <strong><?php echo htmlspecialchars($defaultPassword); ?></strong></p>
-                <p>Tại đây bạn có thể khóa/mở khóa tài khoản và khởi tạo lại mật khẩu.</p>
-              </div>
+                <p>Reset mật khẩu sẽ đưa về mật khẩu gốc lúc tạo tài khoản.</p>
+                <p>Đã bỏ chức năng chỉnh sửa tài khoản theo yêu cầu.</p>
             </div>
-          </div>
-        </section>
-
+        </div>
+    </div>
+</section>

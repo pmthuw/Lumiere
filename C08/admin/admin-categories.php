@@ -1,6 +1,17 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'categories') ? ' active' : ''; ?>" id="page-categories">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải loại sản phẩm.
+        </div>
+    </section>
+    <?php
+    return;
+}
+
 try {
     $hasStatus = (bool)$pdo->query("SHOW COLUMNS FROM categories LIKE 'status'")->fetch(PDO::FETCH_ASSOC);
     if (!$hasStatus) {
@@ -15,6 +26,12 @@ function productsTableExists(PDO $pdo): bool
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products'");
     $stmt->execute();
     return (int)$stmt->fetchColumn() > 0;
+}
+
+function categoriesHasStatusColumn(PDO $pdo): bool
+{
+    $stmt = $pdo->query("SHOW COLUMNS FROM categories LIKE 'status'");
+    return (bool)$stmt->fetch(PDO::FETCH_ASSOC);
 }
 
 $successMessage = '';
@@ -32,9 +49,31 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             $errorMessage = 'Tên danh mục không được để trống.';
         } else {
             try {
-                $stmt = $pdo->prepare("INSERT INTO categories (name, description) VALUES (?, ?) ON DUPLICATE KEY UPDATE description = VALUES(description)");
-                $stmt->execute([$name, $description !== '' ? $description : null]);
-                $successMessage = 'Đã thêm/cập nhật danh mục thành công.';
+                $hasStatusColumn = categoriesHasStatusColumn($pdo);
+
+                $findStmt = $pdo->prepare("SELECT id FROM categories WHERE LOWER(name) = LOWER(?) LIMIT 1");
+                $findStmt->execute([$name]);
+                $existing = $findStmt->fetch(PDO::FETCH_ASSOC);
+
+                if ($existing) {
+                    if ($hasStatusColumn) {
+                        $updateStmt = $pdo->prepare("UPDATE categories SET name = ?, description = ?, status = 'active' WHERE id = ?");
+                        $updateStmt->execute([$name, $description !== '' ? $description : null, (int)$existing['id']]);
+                    } else {
+                        $updateStmt = $pdo->prepare("UPDATE categories SET name = ?, description = ? WHERE id = ?");
+                        $updateStmt->execute([$name, $description !== '' ? $description : null, (int)$existing['id']]);
+                    }
+                } else {
+                    if ($hasStatusColumn) {
+                        $insertStmt = $pdo->prepare("INSERT INTO categories (name, description, status) VALUES (?, ?, 'active')");
+                        $insertStmt->execute([$name, $description !== '' ? $description : null]);
+                    } else {
+                        $insertStmt = $pdo->prepare("INSERT INTO categories (name, description) VALUES (?, ?)");
+                        $insertStmt->execute([$name, $description !== '' ? $description : null]);
+                    }
+                }
+
+                $successMessage = 'Đã thêm/cập nhật danh mục và bật hiển thị thành công.';
             } catch (Throwable $e) {
                 $errorMessage = 'Không thể thêm danh mục: ' . $e->getMessage();
             }
@@ -69,41 +108,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         }
     }
 
-    if ($action === 'delete_category') {
-        $id = (int)($_POST['category_id'] ?? 0);
-
-        if ($id <= 0) {
-            $errorMessage = 'ID danh mục không hợp lệ.';
-        } else {
-            try {
-                $nameStmt = $pdo->prepare("SELECT name FROM categories WHERE id = ?");
-                $nameStmt->execute([$id]);
-                $category = $nameStmt->fetch(PDO::FETCH_ASSOC);
-
-                if (!$category) {
-                    $errorMessage = 'Danh mục không tồn tại.';
-                } else {
-                    $productCount = 0;
-                    if (productsTableExists($pdo)) {
-                        $countStmt = $pdo->prepare("SELECT COUNT(*) FROM products WHERE category = ?");
-                        $countStmt->execute([$category['name']]);
-                        $productCount = (int)$countStmt->fetchColumn();
-                    }
-
-                    if ($productCount > 0) {
-                        $errorMessage = 'Không thể xóa danh mục và vẫn còn sản phẩm thuộc danh mục này.';
-                    } else {
-                        $deleteStmt = $pdo->prepare("DELETE FROM categories WHERE id = ?");
-                        $deleteStmt->execute([$id]);
-                        $successMessage = 'Đã xóa danh mục thành công.';
-                    }
-                }
-            } catch (Throwable $e) {
-                $errorMessage = 'Không thể xóa danh mục: ' . $e->getMessage();
-            }
-        }
-    }
-
     if ($action === 'toggle_category_status') {
         $id = (int)($_POST['category_id'] ?? 0);
         if ($id <= 0) {
@@ -127,7 +131,7 @@ if ($editCategoryId > 0) {
     $editingCategory = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
 }
 
-$categories = $pdo->query("SELECT * FROM categories ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+$categories = $pdo->query("SELECT * FROM categories ORDER BY CASE WHEN status = 'hidden' THEN 1 ELSE 0 END, name")->fetchAll(PDO::FETCH_ASSOC);
 $categoryCounts = [];
 $hasProductsTable = productsTableExists($pdo);
 
@@ -205,11 +209,6 @@ foreach ($categories as $cat) {
                                             <button type="submit" class="btn btn-sm <?php echo $isHidden ? 'btn-ghost' : 'btn-danger'; ?>">
                                                 <?php echo $isHidden ? 'Mở' : 'Ẩn'; ?>
                                             </button>
-                                        </form>
-                                        <form method="post" style="display: inline;" onsubmit="return confirm('Bạn có chắc muốn xóa danh mục này?')">
-                                            <input type="hidden" name="action" value="delete_category">
-                                            <input type="hidden" name="category_id" value="<?php echo (int)$cat['id']; ?>">
-                                            <button type="submit" class="btn btn-danger btn-sm btn-icon">Xóa</button>
                                         </form>
                                     </div>
                                 </td>

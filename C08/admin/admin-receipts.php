@@ -1,6 +1,17 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'receipts') ? ' active' : ''; ?>" id="page-receipts">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải phiếu nhập hàng.
+        </div>
+    </section>
+    <?php
+    return;
+}
+
 function ensureReceiptSchema(PDO $pdo): void
 {
     $pdo->exec("CREATE TABLE IF NOT EXISTS receipts (
@@ -37,38 +48,15 @@ function ensureReceiptSchema(PDO $pdo): void
     $checkAvgCost = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'avg_import_price'");
     $checkAvgCost->execute();
     if ((int)$checkAvgCost->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN avg_import_price DECIMAL(15,2) NOT NULL DEFAULT 0 AFTER initial_stock");
+        $pdo->exec("ALTER TABLE products ADD COLUMN avg_import_price INT UNSIGNED NOT NULL DEFAULT 0 AFTER initial_stock");
     }
+    $pdo->exec("ALTER TABLE products MODIFY COLUMN avg_import_price INT UNSIGNED NOT NULL DEFAULT 0");
 
     $checkProfit = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'profit_rate'");
     $checkProfit->execute();
     if ((int)$checkProfit->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN profit_rate DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER price");
+        $pdo->exec("ALTER TABLE products ADD COLUMN profit_rate DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER avg_import_price");
     }
-
-    // Backfill initial import cost for legacy products:
-    // 1) from latest completed receipt item
-    // 2) fallback from selling price and profit rate
-    $pdo->exec("UPDATE products p
-        LEFT JOIN (
-            SELECT ri.product_id, ri.import_price
-            FROM receipt_items ri
-            INNER JOIN receipts r ON r.id = ri.receipt_id
-            INNER JOIN (
-                SELECT ri2.product_id, MAX(CONCAT(DATE_FORMAT(r2.import_date, '%Y%m%d'), '-', LPAD(r2.id, 10, '0'), '-', LPAD(ri2.id, 10, '0'))) AS max_key
-                FROM receipt_items ri2
-                INNER JOIN receipts r2 ON r2.id = ri2.receipt_id
-                WHERE r2.status = 'completed'
-                GROUP BY ri2.product_id
-            ) x ON x.product_id = ri.product_id
-                 AND CONCAT(DATE_FORMAT(r.import_date, '%Y%m%d'), '-', LPAD(r.id, 10, '0'), '-', LPAD(ri.id, 10, '0')) = x.max_key
-        ) latest ON latest.product_id = p.id
-        SET p.avg_import_price = CASE
-            WHEN latest.import_price IS NOT NULL THEN latest.import_price
-            WHEN COALESCE(p.profit_rate, 0) > 0 THEN ROUND(p.price / (1 + (p.profit_rate / 100)), 2)
-            ELSE p.price
-        END
-        WHERE COALESCE(p.avg_import_price, 0) <= 0");
 
     $checkCode = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'product_code'");
     $checkCode->execute();
@@ -122,7 +110,29 @@ function redirectToReceiptsPage(): void
     exit;
 }
 
+function normalizeImportDateInput(string $rawDate, string $todayDate): ?string
+{
+    $value = trim($rawDate);
+    if ($value === '') {
+        return null;
+    }
+
+    $dt = DateTime::createFromFormat('Y-m-d', $value);
+    if (!($dt instanceof DateTime)) {
+        return null;
+    }
+
+    $normalized = $dt->format('Y-m-d');
+    if ($normalized > $todayDate) {
+        return null;
+    }
+
+    return $normalized;
+}
+
 ensureReceiptSchema($pdo);
+
+$todayDate = date('Y-m-d');
 
 $successMessage = '';
 $errorMessage = '';
@@ -133,12 +143,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     $action = $_POST['receipt_action'] ?? '';
 
     if ($action === 'create_receipt') {
-        $importDate = trim($_POST['import_date'] ?? '');
-        $notes = trim($_POST['notes'] ?? '');
+        $importDate = normalizeImportDateInput((string)($_POST['import_date'] ?? ''), $todayDate);
         $items = receiptItemsPayload();
 
-        if ($importDate === '' || empty($items)) {
-            $errorMessage = 'Vui lòng chọn ngày nhập và nhập ít nhất 1 dòng sản phẩm hợp lệ.';
+        if ($importDate === null || empty($items)) {
+            $errorMessage = 'Vui lòng chọn ngày nhập hợp lệ (không ở tương lai) và nhập ít nhất 1 dòng sản phẩm hợp lệ.';
         } else {
             try {
                 $pdo->beginTransaction();
@@ -146,8 +155,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 $round = nextImportRound($pdo, $importDate);
                 $receiptCode = generateReceiptCode($importDate, $round);
 
-                $receiptStmt = $pdo->prepare("INSERT INTO receipts (receipt_code, import_date, import_round, status, notes) VALUES (?, ?, ?, 'draft', ?)");
-                $receiptStmt->execute([$receiptCode, $importDate, $round, $notes !== '' ? $notes : null]);
+                $receiptStmt = $pdo->prepare("INSERT INTO receipts (receipt_code, import_date, import_round, status) VALUES (?, ?, ?, 'draft')");
+                $receiptStmt->execute([$receiptCode, $importDate, $round]);
                 $receiptId = (int)$pdo->lastInsertId();
 
                 $itemStmt = $pdo->prepare("INSERT INTO receipt_items (receipt_id, product_id, import_price, quantity) VALUES (?, ?, ?, ?)");
@@ -168,11 +177,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 
     if ($action === 'update_receipt') {
         $receiptId = (int)($_POST['receipt_id'] ?? 0);
-        $importDate = trim($_POST['import_date'] ?? '');
-        $notes = trim($_POST['notes'] ?? '');
+        $importDate = normalizeImportDateInput((string)($_POST['import_date'] ?? ''), $todayDate);
         $items = receiptItemsPayload();
 
-        if ($receiptId <= 0 || $importDate === '' || empty($items)) {
+        if ($receiptId <= 0 || $importDate === null || empty($items)) {
             $errorMessage = 'Dữ liệu cập nhật phiếu nhập không hợp lệ.';
         } else {
             try {
@@ -188,8 +196,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     $pdo->beginTransaction();
 
                     $newCode = generateReceiptCode($importDate, (int)$current['import_round']);
-                    $receiptStmt = $pdo->prepare("UPDATE receipts SET receipt_code = ?, import_date = ?, notes = ? WHERE id = ?");
-                    $receiptStmt->execute([$newCode, $importDate, $notes !== '' ? $notes : null, $receiptId]);
+                    $receiptStmt = $pdo->prepare("UPDATE receipts SET receipt_code = ?, import_date = ? WHERE id = ?");
+                    $receiptStmt->execute([$newCode, $importDate, $receiptId]);
 
                     $pdo->prepare("DELETE FROM receipt_items WHERE receipt_id = ?")->execute([$receiptId]);
                     $itemStmt = $pdo->prepare("INSERT INTO receipt_items (receipt_id, product_id, import_price, quantity) VALUES (?, ?, ?, ?)");
@@ -234,39 +242,59 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                     if (empty($items)) {
                         $errorMessage = 'Phiếu nhập không có dòng sản phẩm nào.';
                     } else {
-                        $productStmt = $pdo->prepare("SELECT initial_stock, avg_import_price, profit_rate FROM products WHERE id = ? FOR UPDATE");
-                        $updateStmt = $pdo->prepare("UPDATE products SET initial_stock = ?, avg_import_price = ?, price = ? WHERE id = ?");
-
+                        $aggregatedItems = [];
                         foreach ($items as $item) {
-                            $productId = (int)$item['product_id'];
-                            $importQty = (int)$item['quantity'];
-                            $newImportPrice = (float)$item['import_price'];
+                            $productId = (int)($item['product_id'] ?? 0);
+                            $qty = max(0, (int)($item['quantity'] ?? 0));
+                            $price = max(0, (float)($item['import_price'] ?? 0));
 
-                            $productStmt->execute([$productId]);
-                            $product = $productStmt->fetch(PDO::FETCH_ASSOC);
-
-                            if (!$product) {
-                                throw new RuntimeException('Không tìm thấy sản phẩm ID ' . $productId . ' khi hoàn thành phiếu nhập.');
+                            if ($productId <= 0 || $qty <= 0 || $price <= 0) {
+                                continue;
                             }
 
-                            $currentStock = (int)($product['initial_stock'] ?? 0);
-                            $currentAvgCost = (float)($product['avg_import_price'] ?? 0);
-                            $profitRate = (float)($product['profit_rate'] ?? 0);
-
-                            $newStock = $currentStock + $importQty;
-                            if ($newStock <= 0) {
-                                $newAvgCost = 0.0;
-                            } else {
-                                $newAvgCost = (($currentStock * $currentAvgCost) + ($importQty * $newImportPrice)) / $newStock;
+                            if (!isset($aggregatedItems[$productId])) {
+                                $aggregatedItems[$productId] = [
+                                    'quantity' => 0,
+                                    'total_cost' => 0.0
+                                ];
                             }
 
-                            $newSellingPrice = (int)round($newAvgCost * (1 + ($profitRate / 100)));
-                            $updateStmt->execute([$newStock, $newAvgCost, $newSellingPrice, $productId]);
+                            $aggregatedItems[$productId]['quantity'] += $qty;
+                            $aggregatedItems[$productId]['total_cost'] += ($qty * $price);
                         }
 
-                        $doneStmt = $pdo->prepare("UPDATE receipts SET status = 'completed', completed_at = NOW() WHERE id = ?");
-                        $doneStmt->execute([$receiptId]);
-                        $successMessage = 'Đã hoàn thành phiếu nhập và cập nhật số lượng tồn.';
+                        if (empty($aggregatedItems)) {
+                            $errorMessage = 'Chi tiết phiếu nhập không hợp lệ để hoàn thành.';
+                        }
+
+                        if ($errorMessage === '') {
+                            $productStmt = $pdo->prepare("SELECT initial_stock, avg_import_price FROM products WHERE id = ? FOR UPDATE");
+                            $updateStmt = $pdo->prepare("UPDATE products SET initial_stock = ?, avg_import_price = ? WHERE id = ?");
+
+                            foreach ($aggregatedItems as $productId => $agg) {
+                                $importQty = (int)$agg['quantity'];
+
+                                $productStmt->execute([$productId]);
+                                $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+
+                                if (!$product) {
+                                    throw new RuntimeException('Không tìm thấy sản phẩm ID ' . $productId . ' khi hoàn thành phiếu nhập.');
+                                }
+
+                                $currentStock = (int)($product['initial_stock'] ?? 0);
+                                $currentAvgImportPrice = (int)($product['avg_import_price'] ?? 0);
+                                $newStock = $currentStock + $importQty;
+                                $newAvgImportPrice = $newStock > 0
+                                    ? (int)round((($currentAvgImportPrice * $currentStock) + (float)$agg['total_cost']) / $newStock)
+                                    : $currentAvgImportPrice;
+
+                                $updateStmt->execute([$newStock, $newAvgImportPrice, $productId]);
+                            }
+
+                            $doneStmt = $pdo->prepare("UPDATE receipts SET status = 'completed', completed_at = NOW() WHERE id = ?");
+                            $doneStmt->execute([$receiptId]);
+                            $successMessage = 'Đã hoàn thành phiếu nhập, cập nhật giá vốn bình quân và số lượng tồn.';
+                        }
                     }
                 }
 
@@ -299,17 +327,14 @@ if ($editReceiptId > 0) {
     }
 }
 
-$productKeyword = trim($_GET['product_q'] ?? '');
 $receiptKeyword = trim($_GET['receipt_q'] ?? '');
-
-if ($productKeyword !== '') {
-    $productsStmt = $pdo->prepare("SELECT id, COALESCE(product_code, CONCAT('SP', LPAD(id, 3, '0'))) AS product_code, name, category FROM products WHERE name LIKE ? OR category LIKE ? OR COALESCE(product_code, '') LIKE ? ORDER BY name LIMIT 200");
-    $kw = '%' . $productKeyword . '%';
-    $productsStmt->execute([$kw, $kw, $kw]);
-} else {
-    $productsStmt = $pdo->query("SELECT id, COALESCE(product_code, CONCAT('SP', LPAD(id, 3, '0'))) AS product_code, name, category FROM products ORDER BY name LIMIT 200");
-}
+$productsStmt = $pdo->query("SELECT id, COALESCE(product_code, CONCAT('SP', LPAD(id, 3, '0'))) AS product_code, name, category FROM products ORDER BY name LIMIT 200");
 $products = $productsStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$productLabelById = [];
+foreach ($products as $product) {
+    $productLabelById[(int)$product['id']] = $product['product_code'] . ' - ' . $product['name'] . ' (' . $product['category'] . ')';
+}
 
 if ($receiptKeyword !== '') {
     $receiptsStmt = $pdo->prepare("SELECT r.id, r.receipt_code, r.import_date, r.import_round, r.status, r.created_at, COALESCE(SUM(ri.quantity),0) AS total_qty, COALESCE(SUM(ri.quantity * ri.import_price),0) AS total_amount
@@ -330,8 +355,7 @@ if ($receiptKeyword !== '') {
 $receipts = $receiptsStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $formDate = $editingReceipt['import_date'] ?? date('Y-m-d');
-$formNotes = $editingReceipt['notes'] ?? '';
-$formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_id' => '', 'quantity' => '', 'import_price' => '']);
+$formItems = !empty($editingItems) ? $editingItems : [['product_id' => '', 'quantity' => '', 'import_price' => '']];
 ?>
 
 <section class="admin-page<?php echo ($page === 'receipts') ? ' active' : ''; ?>" id="page-receipts">
@@ -354,31 +378,12 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
         </div>
     <?php endif; ?>
 
-    <div class="table-wrap" style="margin-bottom:1.5rem;">
-        <div class="table-toolbar">
-            <h3>Tìm sản phẩm để lập phiếu</h3>
-            <form method="get" style="display:flex;gap:0.6rem;align-items:center;">
-                <input type="hidden" name="page" value="receipts">
-                <?php if ($editReceiptId > 0): ?>
-                    <input type="hidden" name="edit_receipt" value="<?php echo (int)$editReceiptId; ?>">
-                <?php endif; ?>
-                <?php if ($receiptKeyword !== ''): ?>
-                    <input type="hidden" name="receipt_q" value="<?php echo htmlspecialchars($receiptKeyword); ?>">
-                <?php endif; ?>
-                <input class="search-inline" type="text" name="product_q" value="<?php echo htmlspecialchars($productKeyword); ?>" placeholder="Tìm theo mã, tên, loại...">
-                <button class="btn btn-ghost btn-sm" type="submit">Tìm</button>
-                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts<?php echo $receiptKeyword !== '' ? '&receipt_q=' . urlencode($receiptKeyword) : ''; ?>">Đặt lại</a>
-            </form>
-        </div>
-        <p class="td-muted" style="padding:0 1rem 1rem;">Có <?php echo count($products); ?> sản phẩm phù hợp từ tìm kiếm hiện tại để chọn vào phiếu nhập.</p>
-    </div>
-
     <?php if ($editingReceipt): ?>
     <div id="receipt-edit-modal" style="position: fixed; inset: 0; background: rgba(6,8,16,0.72); z-index: 1200; display: flex; align-items: center; justify-content: center; padding: 1rem;">
         <div class="table-wrap" style="padding:1.5rem; margin-bottom:0; width:min(1200px, 100%); max-height:90vh; overflow:auto;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
                 <div class="td-muted">Chế độ sửa phiếu nhập</div>
-                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts<?php echo $receiptKeyword !== '' ? '&receipt_q=' . urlencode($receiptKeyword) : ''; ?><?php echo $productKeyword !== '' ? '&product_q=' . urlencode($productKeyword) : ''; ?>" aria-label="Đóng">×</a>
+                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts<?php echo $receiptKeyword !== '' ? '&receipt_q=' . urlencode($receiptKeyword) : ''; ?>" aria-label="Đóng">×</a>
             </div>
     <?php else: ?>
     <div class="table-wrap" style="padding:1.5rem; margin-bottom:1.5rem;">
@@ -404,18 +409,11 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
             <div class="form-row form-row-2">
                 <div class="form-group">
                     <label>Ngày nhập *</label>
-                    <input class="form-control" type="date" name="import_date" value="<?php echo htmlspecialchars($formDate); ?>" <?php echo ($editingReceipt && $editingReceipt['status'] !== 'draft') ? 'disabled' : 'required'; ?>>
+                    <input class="form-control" id="receipt-import-date" type="date" name="import_date" max="<?php echo htmlspecialchars($todayDate); ?>" value="<?php echo htmlspecialchars($formDate); ?>" <?php echo ($editingReceipt && $editingReceipt['status'] !== 'draft') ? 'disabled' : 'required'; ?>>
                 </div>
                 <div class="form-group">
                     <label>Lần nhập</label>
                     <input class="form-control" type="text" value="<?php echo $editingReceipt ? ('Lần ' . (int)$editingReceipt['import_round']) : 'Tự động theo ngày nhập'; ?>" readonly>
-                </div>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Ghi chú phiếu</label>
-                    <textarea class="form-control" name="notes" <?php echo ($editingReceipt && $editingReceipt['status'] !== 'draft') ? 'disabled' : ''; ?>><?php echo htmlspecialchars($formNotes); ?></textarea>
                 </div>
             </div>
 
@@ -426,31 +424,78 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
                             <th style="width:50%;">Sản phẩm</th>
                             <th style="width:20%;">Số lượng nhập</th>
                             <th style="width:30%;">Giá nhập</th>
+                            <?php if (!$editingReceipt || ($editingReceipt['status'] ?? '') === 'draft'): ?>
+                                <th style="width:1%;"></th>
+                            <?php endif; ?>
                         </tr>
                     </thead>
+                    <?php if (!$editingReceipt || ($editingReceipt['status'] ?? '') === 'draft'): ?>
                     <tbody>
-                        <?php foreach ($formItems as $idx => $item): ?>
-                            <tr>
-                                <td>
-                                    <select class="form-control" name="product_id[]" <?php echo ($editingReceipt && $editingReceipt['status'] !== 'draft') ? 'disabled' : ''; ?>>
-                                        <option value="">-- Chọn sản phẩm --</option>
-                                        <?php foreach ($products as $product): ?>
-                                            <option value="<?php echo (int)$product['id']; ?>" <?php echo ((int)($item['product_id'] ?? 0) === (int)$product['id']) ? 'selected' : ''; ?>>
-                                                <?php echo htmlspecialchars($product['product_code'] . ' - ' . $product['name'] . ' (' . $product['category'] . ')'); ?>
-                                            </option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                    <?php if ($editingReceipt && $editingReceipt['status'] !== 'draft'): ?>
-                                        <input type="hidden" name="product_id[]" value="<?php echo (int)($item['product_id'] ?? 0); ?>">
+                        <tr>
+                            <td>
+                                <select class="form-control" id="receipt-input-product">
+                                    <option value="">-- Chọn sản phẩm --</option>
+                                    <?php foreach ($products as $product): ?>
+                                        <option value="<?php echo (int)$product['id']; ?>" data-label="<?php echo htmlspecialchars($product['product_code'] . ' - ' . $product['name'] . ' (' . $product['category'] . ')'); ?>">
+                                            <?php echo htmlspecialchars($product['product_code'] . ' - ' . $product['name'] . ' (' . $product['category'] . ')'); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                            <td>
+                                <input class="form-control" type="number" min="0" id="receipt-input-qty" value="">
+                            </td>
+                            <td>
+                                <input class="form-control" type="number" min="0" id="receipt-input-price" value="">
+                            </td>
+                            <td>
+                                <button type="button" class="btn btn-gold btn-sm" onclick="commitReceiptInput()">Nhập vào phiếu</button>
+                            </td>
+                        </tr>
+                    </tbody>
+                    <?php endif; ?>
+                </table>
+            </div>
+
+            <div class="table-wrap" style="margin-top:1rem;">
+                <div class="table-toolbar">
+                    <h3>Chi tiết phiếu nhập</h3>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:50%;">Sản phẩm</th>
+                            <th style="width:20%;">Số lượng nhập</th>
+                            <th style="width:30%;">Giá nhập</th>
+                            <?php if (!$editingReceipt || ($editingReceipt['status'] ?? '') === 'draft'): ?>
+                                <th style="width:1%;"></th>
+                            <?php endif; ?>
+                        </tr>
+                    </thead>
+                    <tbody id="receipt-items-tbody">
+                        <?php foreach ($formItems as $item): ?>
+                            <?php $pid = (int)($item['product_id'] ?? 0); ?>
+                            <?php if ($pid > 0 && (int)($item['quantity'] ?? 0) > 0 && (int)($item['import_price'] ?? 0) > 0): ?>
+                                <tr>
+                                    <td>
+                                        <?php echo htmlspecialchars($productLabelById[$pid] ?? ('Sản phẩm ID ' . $pid)); ?>
+                                        <input type="hidden" name="product_id[]" value="<?php echo $pid; ?>">
+                                    </td>
+                                    <td>
+                                        <?php echo (int)$item['quantity']; ?>
+                                        <input type="hidden" name="quantity[]" value="<?php echo (int)$item['quantity']; ?>">
+                                    </td>
+                                    <td>
+                                        <?php echo number_format((int)$item['import_price'], 0, ',', '.'); ?>
+                                        <input type="hidden" name="import_price[]" value="<?php echo (int)$item['import_price']; ?>">
+                                    </td>
+                                    <?php if (!$editingReceipt || ($editingReceipt['status'] ?? '') === 'draft'): ?>
+                                        <td>
+                                            <button type="button" class="btn btn-ghost btn-sm" onclick="removeReceiptItemRow(this)">Xóa</button>
+                                        </td>
                                     <?php endif; ?>
-                                </td>
-                                <td>
-                                    <input class="form-control" type="number" min="0" name="quantity[]" value="<?php echo htmlspecialchars((string)($item['quantity'] ?? '')); ?>" <?php echo ($editingReceipt && $editingReceipt['status'] !== 'draft') ? 'readonly' : ''; ?>>
-                                </td>
-                                <td>
-                                    <input class="form-control" type="number" min="0" name="import_price[]" value="<?php echo htmlspecialchars((string)($item['import_price'] ?? '')); ?>" <?php echo ($editingReceipt && $editingReceipt['status'] !== 'draft') ? 'readonly' : ''; ?>>
-                                </td>
-                            </tr>
+                                </tr>
+                            <?php endif; ?>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
@@ -462,7 +507,6 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
                         <?php echo $editingReceipt ? 'Lưu phiếu nhập' : '+ Tạo phiếu nhập'; ?>
                     </button>
                 <?php endif; ?>
-                <a class="btn btn-ghost" href="index.php?page=receipts">Phiếu mới</a>
             </div>
         </form>
     </div>
@@ -476,12 +520,9 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
             <h3>Danh sách phiếu nhập</h3>
             <form method="get" style="display:flex;gap:0.6rem;align-items:center;">
                 <input type="hidden" name="page" value="receipts">
-                <?php if ($productKeyword !== ''): ?>
-                    <input type="hidden" name="product_q" value="<?php echo htmlspecialchars($productKeyword); ?>">
-                <?php endif; ?>
                 <input class="search-inline" type="text" name="receipt_q" value="<?php echo htmlspecialchars($receiptKeyword); ?>" placeholder="Tìm mã phiếu hoặc ngày nhập...">
                 <button class="btn btn-ghost btn-sm" type="submit">Tìm phiếu</button>
-                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts<?php echo $productKeyword !== '' ? '&product_q=' . urlencode($productKeyword) : ''; ?>">Đặt lại</a>
+                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts">Đặt lại</a>
             </form>
         </div>
 
@@ -512,7 +553,7 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
                         </td>
                         <td>
                             <div style="display:flex;gap:0.4rem;">
-                                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts&edit_receipt=<?php echo (int)$receipt['id']; ?><?php echo $receiptKeyword !== '' ? '&receipt_q=' . urlencode($receiptKeyword) : ''; ?><?php echo $productKeyword !== '' ? '&product_q=' . urlencode($productKeyword) : ''; ?>">
+                                <a class="btn btn-ghost btn-sm" href="index.php?page=receipts&edit_receipt=<?php echo (int)$receipt['id']; ?><?php echo $receiptKeyword !== '' ? '&receipt_q=' . urlencode($receiptKeyword) : ''; ?>">
                                     <?php echo $receipt['status'] === 'draft' ? 'Sửa' : 'Xem'; ?>
                                 </a>
                                 <?php if ($receipt['status'] === 'draft'): ?>
@@ -530,5 +571,125 @@ $formItems = !empty($editingItems) ? $editingItems : array_fill(0, 5, ['product_
         </table>
     </div>
 </section>
+
+<?php if (!$editingReceipt || ($editingReceipt['status'] ?? '') === 'draft'): ?>
+<script>
+    (function () {
+        const tbody = document.getElementById('receipt-items-tbody');
+        if (!tbody) return;
+
+        const importDateInput = document.getElementById('receipt-import-date');
+        const today = '<?php echo htmlspecialchars($todayDate, ENT_QUOTES); ?>';
+
+        if (importDateInput) {
+            const validateImportDate = () => {
+                const isFuture = !!importDateInput.value && importDateInput.value > today;
+                if (isFuture) {
+                    importDateInput.style.borderColor = '#e05050';
+                    importDateInput.style.background = 'rgba(224, 80, 80, 0.08)';
+                    importDateInput.setCustomValidity('Ngày nhập không được ở tương lai.');
+                } else {
+                    importDateInput.style.borderColor = '';
+                    importDateInput.style.background = '';
+                    importDateInput.setCustomValidity('');
+                }
+            };
+
+            importDateInput.addEventListener('input', validateImportDate);
+            importDateInput.addEventListener('change', validateImportDate);
+            validateImportDate();
+        }
+
+        const inputProduct = document.getElementById('receipt-input-product');
+        const inputQty = document.getElementById('receipt-input-qty');
+        const inputPrice = document.getElementById('receipt-input-price');
+        const form = tbody.closest('form');
+
+        function createHidden(name, value) {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = String(value);
+            return input;
+        }
+
+        window.commitReceiptInput = function () {
+            if (!inputProduct || !inputQty || !inputPrice) return;
+
+            const productId = inputProduct.value || '';
+            const qty = Number(inputQty.value || 0);
+            const price = Number(inputPrice.value || 0);
+
+            if (!productId || qty <= 0 || price <= 0) {
+                alert('Vui lòng chọn sản phẩm, nhập số lượng và giá nhập hợp lệ trước khi thêm vào phiếu.');
+                return;
+            }
+
+            const selectedOption = inputProduct.options[inputProduct.selectedIndex];
+            const productLabel = selectedOption ? selectedOption.text : '';
+
+            const tr = document.createElement('tr');
+
+            const tdProduct = document.createElement('td');
+            tdProduct.textContent = productLabel;
+            tdProduct.appendChild(createHidden('product_id[]', productId));
+
+            const tdQty = document.createElement('td');
+            tdQty.textContent = String(qty);
+            tdQty.appendChild(createHidden('quantity[]', qty));
+
+            const tdPrice = document.createElement('td');
+            tdPrice.textContent = Number(price).toLocaleString('vi-VN');
+            tdPrice.appendChild(createHidden('import_price[]', price));
+
+            const tdAction = document.createElement('td');
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'btn btn-ghost btn-sm';
+            removeBtn.textContent = 'Xóa';
+            removeBtn.onclick = function () { removeReceiptItemRow(removeBtn); };
+            tdAction.appendChild(removeBtn);
+
+            tr.appendChild(tdProduct);
+            tr.appendChild(tdQty);
+            tr.appendChild(tdPrice);
+            tr.appendChild(tdAction);
+            tbody.appendChild(tr);
+
+            inputProduct.value = '';
+            inputQty.value = '';
+            inputPrice.value = '';
+            inputProduct.focus();
+        };
+
+        window.removeReceiptItemRow = function (btn) {
+            const row = btn.closest('tr');
+            if (row) {
+                row.remove();
+            }
+        };
+
+        if (form) {
+            form.addEventListener('submit', function (event) {
+                if (!tbody.querySelector('input[name="product_id[]"]')) {
+                    event.preventDefault();
+                    alert('Vui lòng nhập ít nhất 1 dòng sản phẩm vào chi tiết phiếu nhập.');
+                }
+            });
+        }
+
+        if (inputProduct && inputQty && inputPrice) {
+            [inputProduct, inputQty, inputPrice].forEach((element) => {
+                element.addEventListener('keydown', function (event) {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitReceiptInput();
+                    }
+                });
+            });
+        }
+    })();
+</script>
+<?php endif; ?>
 
 

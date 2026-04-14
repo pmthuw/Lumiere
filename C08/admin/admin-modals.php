@@ -115,7 +115,7 @@
                 <option value="Bestseller">Bestseller</option>
                 <option value="Hot">Hot</option>
                 <option value="New">New</option>
-                <option value="Limited">Limited</option>
+                <option value="Giới hạn">Giới hạn</option>
                 <option value="Luxury">Luxury</option>
               </select>
             </div>

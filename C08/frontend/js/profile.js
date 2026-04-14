@@ -2,15 +2,71 @@
 //  USER PROFILE MANAGEMENT
 // ══════════════════════════════════════════════════
 
-// Mở modal hồ sơ người dùng
-function openProfile() {
-  if (!state.user) return;
+function pickFirstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text !== "") return text;
+  }
+  return "";
+}
 
-  const u = state.user;
+function splitName(fullName) {
+  const normalized = String(fullName || "").trim();
+  if (!normalized) {
+    return { firstname: "", lastname: "" };
+  }
+
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) {
+    return { firstname: "", lastname: "" };
+  }
+
+  const firstname = parts.pop() || "";
+  const lastname = parts.join(" ");
+  return { firstname, lastname };
+}
+
+function hydrateCurrentUserProfile() {
+  if (!state.user) return null;
+
+  const current = state.user || {};
+
+  const fullName = pickFirstNonEmpty(
+    current.fullname,
+    current.full_name,
+    current.name,
+  );
+  const nameParts = splitName(fullName);
+
+  const normalizedUser = {
+    ...current,
+    lastname: pickFirstNonEmpty(current.lastname, nameParts.lastname),
+    firstname: pickFirstNonEmpty(current.firstname, nameParts.firstname),
+    phone: pickFirstNonEmpty(current.phone),
+    address: pickFirstNonEmpty(current.address, current.shipping_address),
+    district: pickFirstNonEmpty(current.district),
+    city: pickFirstNonEmpty(current.city),
+    ward: pickFirstNonEmpty(current.ward),
+  };
+
+  state.user = normalizedUser;
+  return normalizedUser;
+}
+
+// Mở modal hồ sơ người dùng
+async function openProfile() {
+  if (typeof loadCurrentUserFromDB === "function") {
+    await loadCurrentUserFromDB({ silent: true });
+  }
+
+  const u = hydrateCurrentUserProfile();
+  if (!u) return;
 
   // Avatar initials
+  const avatarSource = pickFirstNonEmpty(u.lastname, u.firstname, u.email, "?");
+  const secondarySource = pickFirstNonEmpty(u.firstname, " ");
   const initials = (
-    u.lastname.charAt(0) + (u.firstname.charAt(0) || "")
+    avatarSource.charAt(0) + secondarySource.charAt(0)
   ).toUpperCase();
 
   const profAvatar = document.getElementById("prof-avatar");
@@ -18,7 +74,16 @@ function openProfile() {
   const profEmail = document.getElementById("prof-email");
 
   if (profAvatar) profAvatar.textContent = initials;
-  if (profName) profName.textContent = u.lastname + " " + u.firstname;
+  if (profName) {
+    const displayName = pickFirstNonEmpty(
+      `${u.lastname || ""} ${u.firstname || ""}`.trim(),
+      u.fullname,
+      u.full_name,
+      u.username,
+      "Khách hàng",
+    );
+    profName.textContent = displayName;
+  }
   if (profEmail) profEmail.textContent = u.email;
 
   // Điền dữ liệu vào form
@@ -34,7 +99,22 @@ function openProfile() {
 
   Object.entries(map).forEach(([k, id]) => {
     const el = document.getElementById(id);
-    if (el) el.value = u[k] || "";
+    if (!el) return;
+
+    const value = u[k] || "";
+    if (id === "pf-city" && value && el.tagName === "SELECT") {
+      const hasOption = Array.from(el.options).some(
+        (opt) => opt.value === value,
+      );
+      if (!hasOption) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = value;
+        el.appendChild(opt);
+      }
+    }
+
+    el.value = value;
   });
 
   switchProfTab("info");
@@ -59,7 +139,7 @@ function switchProfTab(tab) {
 }
 
 // Lưu thông tin hồ sơ
-function saveProfileInfo() {
+async function saveProfileInfo() {
   if (!state.user) return;
 
   const ln = document.getElementById("pf-lastname").value.trim();
@@ -83,21 +163,40 @@ function saveProfileInfo() {
     return;
   }
 
-  Object.assign(state.user, {
-    lastname: ln,
-    firstname: fn,
-    phone: ph,
-    address: ad,
-    district: di,
-    city: ci,
-  });
+  try {
+    const response = await fetch("api-profile.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        action: "update_info",
+        lastname: ln,
+        firstname: fn,
+        phone: ph,
+        address: ad,
+        district: di,
+        city: ci,
+      }),
+    });
 
-  // Cập nhật trong mảng users
-  const idx = state.users.findIndex((u) => u.email === state.user.email);
-  if (idx !== -1) state.users[idx] = { ...state.users[idx], ...state.user };
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      showProfileMsg(
+        "pf-info-msg",
+        result?.message || "Không thể cập nhật thông tin hồ sơ.",
+        false,
+      );
+      return;
+    }
 
-  localStorage.setItem("lum_user", JSON.stringify(state.user));
-  localStorage.setItem("lum_users", JSON.stringify(state.users));
+    state.user = result.user || state.user;
+    state.user = hydrateCurrentUserProfile() || state.user;
+  } catch (error) {
+    showProfileMsg("pf-info-msg", "Lỗi kết nối máy chủ.", false);
+    return;
+  }
 
   // Refresh avatar & greeting
   const profAvatar = document.getElementById("prof-avatar");
@@ -137,7 +236,7 @@ function cancelProfileEdit() {
 }
 
 // Lưu mật khẩu mới
-function savePassword() {
+async function savePassword() {
   if (!state.user) return;
 
   const oldPw = document.getElementById("pw-old").value;
@@ -146,11 +245,6 @@ function savePassword() {
 
   if (!oldPw || !newPw || !cfmPw) {
     showProfileMsg("pf-pw-msg", "Vui lòng điền đầy đủ!", false);
-    return;
-  }
-
-  if (oldPw !== state.user.password) {
-    showProfileMsg("pf-pw-msg", "Mật khẩu hiện tại không đúng!", false);
     return;
   }
 
@@ -164,12 +258,43 @@ function savePassword() {
     return;
   }
 
-  state.user.password = newPw;
-  const idx = state.users.findIndex((u) => u.email === state.user.email);
-  if (idx !== -1) state.users[idx].password = newPw;
+  if (oldPw.length === 0 || newPw.length === 0 || cfmPw.length === 0) {
+    showProfileMsg(
+      "pf-pw-msg",
+      "Vui lòng không để trống bất kỳ trường nào!",
+      false,
+    );
+    return;
+  }
 
-  localStorage.setItem("lum_user", JSON.stringify(state.user));
-  localStorage.setItem("lum_users", JSON.stringify(state.users));
+  try {
+    const response = await fetch("api-profile.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        action: "change_password",
+        old_password: oldPw,
+        new_password: newPw,
+        confirm_password: cfmPw,
+      }),
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      showProfileMsg(
+        "pf-pw-msg",
+        result?.message || "Không thể đổi mật khẩu.",
+        false,
+      );
+      return;
+    }
+  } catch (error) {
+    showProfileMsg("pf-pw-msg", "Lỗi kết nối máy chủ.", false);
+    return;
+  }
 
   clearPwFields();
   showProfileMsg("pf-pw-msg", "Đổi mật khẩu thành công!", true);

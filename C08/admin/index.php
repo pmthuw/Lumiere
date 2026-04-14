@@ -81,7 +81,7 @@ $page = $_GET['page'] ?? 'dashboard';
 
         <span class="sidebar-section-label">Hệ thống</span>
         <a class="sidebar-link <?php echo ($page === 'users') ? 'active' : ''; ?>" href="index.php?page=users">
-          <span class="icon">◉</span> Quản lý khách hàng
+          <span class="icon">◉</span> Quản lý người dùng
         </a>
       </aside>
 

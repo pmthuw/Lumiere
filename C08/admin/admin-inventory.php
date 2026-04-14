@@ -1,96 +1,28 @@
 ﻿<?php
 require_once __DIR__ . '/../setup_db.php';
+require_once __DIR__ . '/inventory-report-utils.php';
 
-function ensureInventorySchema(PDO $pdo): void
-{
-    $pdo->exec("CREATE TABLE IF NOT EXISTS receipts (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        receipt_code VARCHAR(30) NOT NULL UNIQUE,
-        import_date DATE NOT NULL,
-        import_round INT NOT NULL,
-        status ENUM('draft','completed') NOT NULL DEFAULT 'draft',
-        notes TEXT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP NULL DEFAULT NULL,
-        INDEX idx_import_date (import_date),
-        INDEX idx_status (status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS receipt_items (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        receipt_id INT NOT NULL,
-        product_id INT NOT NULL,
-        import_price INT UNSIGNED NOT NULL,
-        quantity INT UNSIGNED NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_receipt_id (receipt_id),
-        INDEX idx_product_id (product_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-    $checkCode = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'product_code'");
-    $checkCode->execute();
-    if ((int)$checkCode->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN product_code VARCHAR(30) NULL UNIQUE AFTER id");
-        $pdo->exec("UPDATE products SET product_code = CONCAT('SP', LPAD(id, 3, '0')) WHERE product_code IS NULL OR product_code = ''");
-    }
-
-    $checkInitialStock = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'initial_stock'");
-    $checkInitialStock->execute();
-    if ((int)$checkInitialStock->fetchColumn() === 0) {
-        $pdo->exec("ALTER TABLE products ADD COLUMN initial_stock INT UNSIGNED NOT NULL DEFAULT 0 AFTER image");
-    }
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    ?>
+    <section class="admin-page<?php echo ($page === 'inventory') ? ' active' : ''; ?>" id="page-inventory">
+        <div style="background: rgba(255, 0, 0, 0.1); border: 1px solid red; color: red; padding: 1rem; margin-bottom: 1rem; border-radius: 0.5rem;">
+            Không thể kết nối cơ sở dữ liệu để tải tồn kho.
+        </div>
+    </section>
+    <?php
+    return;
 }
 
-ensureInventorySchema($pdo);
+ensureInventoryReportSchema($pdo);
 
-$asOfDate = trim($_GET['as_of_date'] ?? date('Y-m-d'));
+$todayDate = date('Y-m-d');
+$asOfDate = normalizeFilterDateInput((string)($_GET['as_of_date'] ?? ''), $todayDate, $todayDate);
 $categoryFilter = trim($_GET['category'] ?? '');
 $lowThreshold = max(1, (int)($_GET['low_threshold'] ?? 5));
 
-if ($asOfDate === '') {
-    $asOfDate = date('Y-m-d');
-}
+$categories = getInventoryReportCategories($pdo);
 
-$categories = $pdo->query("SELECT name FROM categories ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
-
-$whereClause = '';
-$params = [$asOfDate, $asOfDate];
-if ($categoryFilter !== '') {
-    $whereClause = 'WHERE p.category = ?';
-    $params[] = $categoryFilter;
-}
-
-$sql = "SELECT
-    p.id,
-    COALESCE(p.product_code, CONCAT('SP', LPAD(p.id, 3, '0'))) AS product_code,
-    p.name,
-    p.category,
-    COALESCE(p.initial_stock, 0) AS initial_stock,
-    COALESCE(imp.total_import, 0) AS total_import,
-    COALESCE(exp.total_export, 0) AS total_export,
-    GREATEST(0, COALESCE(p.initial_stock, 0) + COALESCE(imp.total_import, 0) - COALESCE(exp.total_export, 0)) AS stock_qty
-FROM products p
-LEFT JOIN (
-    SELECT ri.product_id, SUM(ri.quantity) AS total_import
-    FROM receipt_items ri
-    INNER JOIN receipts r ON r.id = ri.receipt_id
-    WHERE r.status = 'completed' AND DATE(r.import_date) <= ?
-    GROUP BY ri.product_id
-) imp ON imp.product_id = p.id
-LEFT JOIN (
-    SELECT oi.product_id, SUM(oi.quantity) AS total_export
-    FROM order_items oi
-    INNER JOIN orders o ON o.id = oi.order_id
-    WHERE o.status <> 'cancelled' AND DATE(o.created_at) <= ?
-    GROUP BY oi.product_id
-) exp ON exp.product_id = p.id
-{$whereClause}
-ORDER BY stock_qty ASC, p.name ASC";
-
-$stmt = $pdo->prepare($sql);
-$stmt->execute($params);
-$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$rows = buildInventoryReportRows($pdo, '0000-01-01', $asOfDate, $categoryFilter);
 
 $totalStockByFilter = 0;
 $lowItemsCount = 0;
@@ -116,7 +48,7 @@ foreach ($rows as $row) {
             <input type="hidden" name="page" value="inventory">
             <div>
                 <span class="filter-label">Thời điểm tra cứu</span>
-                <input class="search-inline" type="date" name="as_of_date" value="<?php echo htmlspecialchars($asOfDate); ?>" style="width:100%;">
+                <input class="search-inline" type="date" id="inventory-as-of-date" name="as_of_date" max="<?php echo htmlspecialchars($todayDate); ?>" value="<?php echo htmlspecialchars($asOfDate); ?>" style="width:100%;">
             </div>
             <div>
                 <span class="filter-label">Loại sản phẩm</span>
@@ -148,7 +80,7 @@ foreach ($rows as $row) {
 
     <div class="table-wrap">
         <div class="table-toolbar">
-            <h3>Tồn kho tại thời điểm người dòng chọn</h3>
+            <h3>Tồn kho tại thời điểm người dùng chọn</h3>
         </div>
         <table>
             <thead>
@@ -156,16 +88,14 @@ foreach ($rows as $row) {
                     <th>Mã SP</th>
                     <th>Tên sản phẩm</th>
                     <th>Loại</th>
-                    <th>Tổng nhập</th>
-                    <th>Tổng xuất</th>
                     <th>Tồn kho</th>
-                    <th>Cảnh bA�o</th>
+                    <th>Cảnh báo</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($rows)): ?>
                     <tr>
-                        <td colspan="7" class="td-muted">Không cA� dữ liệu phA� hợp.</td>
+                        <td colspan="5" class="td-muted">Không có dữ liệu phù hợp.</td>
                     </tr>
                 <?php else: ?>
                     <?php foreach ($rows as $row): ?>
@@ -174,8 +104,6 @@ foreach ($rows as $row) {
                             <td class="td-muted"><?php echo htmlspecialchars($row['product_code']); ?></td>
                             <td class="td-name"><?php echo htmlspecialchars($row['name']); ?></td>
                             <td><span class="badge badge-muted"><?php echo htmlspecialchars($row['category']); ?></span></td>
-                            <td><?php echo number_format((int)$row['total_import'], 0, ',', '.'); ?></td>
-                            <td><?php echo number_format((int)$row['total_export'], 0, ',', '.'); ?></td>
                             <td class="<?php echo $stock <= $lowThreshold ? 'td-gold' : ''; ?>"><?php echo number_format($stock, 0, ',', '.'); ?></td>
                             <td>
                                 <?php if ($stock <= $lowThreshold): ?>
@@ -191,5 +119,30 @@ foreach ($rows as $row) {
         </table>
     </div>
 </section>
+
+<script>
+    (function () {
+        const input = document.getElementById('inventory-as-of-date');
+        const today = '<?php echo htmlspecialchars($todayDate, ENT_QUOTES); ?>';
+        if (!input) return;
+
+        const validate = () => {
+            const isFuture = !!input.value && input.value > today;
+            if (isFuture) {
+                input.style.borderColor = '#e05050';
+                input.style.background = 'rgba(224, 80, 80, 0.08)';
+                input.setCustomValidity('Không được chọn thời điểm trong tương lai.');
+            } else {
+                input.style.borderColor = '';
+                input.style.background = '';
+                input.setCustomValidity('');
+            }
+        };
+
+        input.addEventListener('input', validate);
+        input.addEventListener('change', validate);
+        validate();
+    })();
+</script>
 
 

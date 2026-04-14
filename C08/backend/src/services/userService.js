@@ -1,9 +1,11 @@
-const bcrypt = require("bcryptjs");
 const { getPool } = require("../db");
 
 async function findByEmail(email) {
   const pool = getPool();
-  const [rows] = await pool.query("SELECT * FROM users WHERE email = ? LIMIT 1", [email]);
+  const [rows] = await pool.query(
+    "SELECT * FROM users WHERE email = ? LIMIT 1",
+    [email],
+  );
   return rows[0] || null;
 }
 
@@ -18,13 +20,12 @@ async function registerUser({ fullName, email, password }) {
     throw err;
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
   const [result] = await pool.query(
     `
     INSERT INTO users (full_name, email, password_hash, role)
     VALUES (?, ?, ?, 'customer')
     `,
-    [fullName, email, passwordHash]
+    [fullName, email, password],
   );
 
   return { id: result.insertId };
@@ -39,7 +40,7 @@ async function loginUser({ email, password }) {
     throw err;
   }
 
-  const ok = await bcrypt.compare(password, user.password_hash);
+  const ok = user.password_hash === password;
   if (!ok) {
     const err = new Error("Invalid credentials");
     err.statusCode = 401;
@@ -59,4 +60,3 @@ module.exports = {
   registerUser,
   loginUser,
 };
-
